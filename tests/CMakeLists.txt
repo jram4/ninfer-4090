@@ -158,6 +158,9 @@ ninfer_add_test(ninfer_linear_add_plan_test
 ninfer_add_test(ninfer_linear_swiglu_plan_test
   SOURCES ops/test_linear_swiglu_plan.cpp
   LIBRARIES ninfer_ops)
+ninfer_add_test(ninfer_q5_linear_add_bitexact_test
+  SOURCES ops/test_q5_linear_add_bitexact.cpp
+  LIBRARIES ninfer_ops)
 ninfer_add_test(ninfer_input_proj_plan_test
   SOURCES ops/test_input_proj_plan.cpp
   LIBRARIES ninfer_ops)

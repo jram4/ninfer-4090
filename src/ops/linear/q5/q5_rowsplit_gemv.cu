@@ -13,6 +13,9 @@ namespace ninfer::ops::detail {
 void q5_rowsplit_gemv_r16_s2_x_launch(const Tensor& x, const Weight& w, Tensor& out,
                                       cudaStream_t stream) {
     constexpr int kK = 5120;
+    // RTX 4090 qualification retained the inherited 16-row, two-stage route for
+    // both 27B projection shapes. Eight-row candidates regressed the cold-cache
+    // medians and are preserved only in the published benchmark evidence.
     if (w.n == 6144) {
         q5_rowsplit_gemv_launch_kernel<6144, kK, 16, 2, true>(
             static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
