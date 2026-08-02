@@ -1,5 +1,8 @@
 # Qwen3.6-35B-A3B Artifact and Conversion Reference
 
+> Dormant inherited reference. The RTX 4090 product does not compile, register, test, package, or
+> support this checkpoint.
+
 This reference records the complete `.ninfer` object inventory and conversion recipe for the exact
 `qwen3.6-35b-a3b` checkpoint: object names, shapes, formats, layouts, MoE expert ordering, fused
 row order, frontend resources, source transforms, memory envelope, and binder obligations. Common
@@ -10,7 +13,7 @@ framing is defined in [`artifact-container.md`](artifact-container.md), numeric 
 
 ## 1. Artifact identity and boundary
 
-The registered exact model identity is:
+The inherited exact model identity is:
 
 ```text
 qwen3.6-35b-a3b

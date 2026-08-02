@@ -121,9 +121,7 @@ All four must output:
 ORCHID=37; COPPER=8142; HARBOR=KESTREL; COLOR=AMBER; SUM=8179
 ```
 
-The registered 27B and 35B-A3B tokenizer/chat-template resources produce identical prompt token
-sequences for every committed JSON file. Both artifacts run these inputs through the same CLI
-surface.
+The registered 27B artifact runs every committed JSON file through the same CLI surface.
 
 ## Fixture construction
 

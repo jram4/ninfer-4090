@@ -16,9 +16,8 @@ benchmark-report, and external protocol behavior. Repository verification princi
 - `targets/qwen3_6_27b/` — registered inventory, converter recipe, source verifier, artifact
   bindings, reference diagnostics, family Program/multimodal/MTP behavior, and the opt-in real-Engine
   prefix test;
-- `targets/qwen3_6_35b_a3b/` — registered inventory/converter contracts, artifact-native diagnostic
-  reference, MoE oracle, typed binding, selected-expert row access, 256K INT8 memory calculation,
-  and the opt-in real public-Engine route;
+- `targets/qwen3_6_35b_a3b/` — dormant inherited inventory/converter and diagnostic tests retained
+  as source reference; they are excluded from the current compiled and registered product;
 - `test_ninfer_artifact_reader.cpp` — C++ framing, directory, encoded-size, payload-span, and
   geometry behavior against a self-contained C++ fixture;
 - `test_generation_controller.cpp` — accepted-prefix, cancellation, publication ordering, and
@@ -52,15 +51,13 @@ Run the native Python suites with the project Python environment:
 
 ```bash
 python3 -m pytest \
-  tests/artifact tests/targets/qwen3_6_27b tests/targets/qwen3_6_35b_a3b \
-  tests/test_bench_matrix.py
+  tests/artifact tests/targets/qwen3_6_27b tests/test_bench_matrix.py
 ```
 
 The Python binding tests use `NINFER_QWEN3_6_27B_ARTIFACT` when set, otherwise they look for
-`out/qwen3_6_27b.ninfer`. They report a pytest skip when neither path provides the real
-artifact. The 35B-A3B reference binding test follows the same rule with
-`NINFER_QWEN3_6_35B_A3B_ARTIFACT` and `out/qwen3_6_35b_a3b.ninfer`. The remaining Python
-target tests still run without either artifact.
+`out/qwen3_6_27b.ninfer`. Private source-checkpoint tests use
+`NINFER_QWEN3_6_27B_SOURCE`. They report an explicit pytest skip when the required external
+artifact or checkpoint is unavailable.
 
 The C++ prefix/MTP integration test is separately opt-in because it loads the full artifact and
 runs the real engine:
@@ -70,15 +67,8 @@ NINFER_QWEN3_6_27B_WEIGHTS=$PWD/out/qwen3_6_27b.ninfer \
   ctest --test-dir build -R ninfer_qwen3_6_27b_prefix_real_test --output-on-failure
 ```
 
-Run the peer 35B-A3B route independently:
-
-```bash
-NINFER_QWEN3_6_35B_A3B_WEIGHTS=$PWD/out/qwen3_6_35b_a3b.ninfer \
-  ctest --test-dir build -R ninfer_qwen3_6_35b_a3b_real_test --output-on-failure
-```
-
-Without the corresponding variable CTest marks each C++ integration test as skipped. Neither test
-uses another numerical/execution path's generated tokens as a golden.
+Without the corresponding variable CTest marks the C++ integration test as skipped. It does not
+use another numerical/execution path's generated tokens as a golden.
 
 The capability-evaluation coordinator has its own environment and unittest entry point:
 

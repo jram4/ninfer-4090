@@ -84,7 +84,7 @@ MTP is disabled by default. Enable one to five draft positions with `--mtp-draft
 `--lm-head-draft` selects the optimized proposal head and requires MTP:
 
 ```bash
-./build/apps/ninfer models/qwen3_6_35b_a3b.ninfer \
+./build/apps/ninfer models/qwen3_6_27b.ninfer \
   --prompt "Write a short explanation of speculative decoding." \
   --max-context 16384 \
   --max-new 512 \
@@ -126,8 +126,8 @@ Run `./build/apps/ninfer --help` for the exact option contract.
 
 ## Context and memory
 
-Both registered models have a native context limit of 262,144 tokens. The practical allocation on
-one RTX 5090 depends on the selected artifact, media workload, output budget, and KV-cache type.
-Use `--kv-dtype int8` for large context allocations. The prepared prompt must fit
-`--max-context`; generation stops at the remaining context capacity when necessary.
-
+Qwen3.6-27B has a native context limit of 262,144 tokens. The practical allocation on one RTX 4090
+depends on the media workload, output budget, and KV-cache type. The verified 24 GiB baseline uses
+a 4,096-token capacity and INT8 KV. Larger allocations are subject to the runtime memory-budget
+check. The prepared prompt must fit `--max-context`; generation stops at the remaining context
+capacity when necessary.

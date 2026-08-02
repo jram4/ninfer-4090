@@ -15,16 +15,6 @@ Anthropic-compatible HTTP endpoints over one resident NInfer Engine.
   --lm-head-draft
 ```
 
-For the 35B-A3B artifact, set both the artifact path and public model alias:
-
-```bash
-./build/apps/ninfer-serve models/qwen3_6_35b_a3b.ninfer \
-  --model-id qwen3.6-35b-a3b \
-  --max-context 16384 \
-  --mtp-draft-tokens 3 \
-  --lm-head-draft
-```
-
 The default `--model-id` is `qwen3.6-27b`; it is an HTTP alias and does not select the artifact.
 
 ## Endpoints

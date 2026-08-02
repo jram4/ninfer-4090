@@ -1,8 +1,11 @@
 # Qwen3.6-35B-A3B Model Reference
 
+> Dormant inherited reference. The RTX 4090 product does not compile, register, test, package, or
+> support this checkpoint.
+
 This reference records the exact BF16 checkpoint's Text, sparse-MoE, MTP, Vision,
 multimodal-position, numeric, and persistent-state semantics. It does not define artifact bytes or
-qualify the advertised extended million-token mode. The registered artifact and quantization
+qualify the advertised extended million-token mode. The inherited artifact and quantization
 specification is [`qwen3.6-35b-a3b-artifact.md`](qwen3.6-35b-a3b-artifact.md).
 
 ## 1. Model identity

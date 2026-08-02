@@ -368,8 +368,9 @@ operation order. Private accumulator precision, Tensor Core operand staging, int
 materialization, workspace dtype, and reduction association are selected by each implementation
 route and accepted against the corresponding oracle tolerance.
 
-GQA numerical qualification covers both registered geometries, supported prompt and small-T
-regimes, the maintained conformance matrix, and target-representative activation ranges. Its
+GQA numerical qualification retains both inherited geometries while the public runtime registers
+only the 27B target. It covers supported prompt and small-T regimes, the maintained conformance
+matrix, and target-representative activation ranges. Its
 `Tolerance::attention_bf16()` and `Tolerance::attention_int8()` acceptance envelopes are explicit
 named standards in `tests/ops/op_check.h`; they are not claimed as pointwise bounds for every
 arbitrary or adversarial BF16 tensor. A1 append-and-attend and A3 cached-only attention are each
