@@ -24,24 +24,19 @@ struct RouteSpec {
     Bf16GdnGatingScheduleId schedule;
 };
 
-constexpr std::array<RouteSpec, 5> k27Routes{{
+// RTX 4090 route boundaries were selected from CUDA-event medians on the qualification host using
+// ten warmups,
+// fifty cold-cache repetitions, and a 256 MiB cache flush. A route changes only when the
+// measured winner is at least 2% faster; ties retain the simpler incumbent.
+constexpr std::array<RouteSpec, 6> k27Routes{{
     {{1, 1}, Bf16GdnGatingScheduleId::GemvPairedRows},
     {{2, 8}, Bf16GdnGatingScheduleId::SmallTSplit10},
-    // The GA102 build admits two split8 CTAs per SM, but only one of the 512-thread split4/2
-    // specializations because their sm_86 register footprint is 74 registers per thread.
-    // Keep every cooperative grid resident across the RTX 3090's 82 SMs.
-    {{9, 768}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
-    {{769, 1664}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
-    {{1665, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
-}};
-
-constexpr std::array<RouteSpec, 5> k35Routes{{
-    // CUDA 12.8/sm_86 resource limits cap split8/4/2 at three CTAs per GA102 SM.
-    {{1, 127}, Bf16GdnGatingScheduleId::MmaCooperativeSplit16},
-    {{128, 960}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
-    {{961, 1920}, Bf16GdnGatingScheduleId::MmaCooperativeSplit4},
-    {{1921, 3904}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
-    {{3905, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
+    // Ada admits two split8 CTAs per SM, but only one of the 512-thread split4/2
+    // specializations. Keep every cooperative grid resident across the RTX 4090's 128 SMs.
+    {{9, 1151}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
+    {{1152, 1280}, Bf16GdnGatingScheduleId::MmaCooperativeSplit4},
+    {{1281, 2688}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
+    {{2689, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
 }};
 
 template <std::size_t N>
@@ -56,14 +51,9 @@ constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes,
 }
 
 static_assert(catalog_is_closed(k27Routes, kAnyCols));
-static_assert(catalog_is_closed(k35Routes, kAnyCols));
 
 bool is_27(const Bf16GdnGatingProblem& problem) noexcept {
     return problem.heads == 48 && problem.input_rows == 5120;
-}
-
-bool is_35(const Bf16GdnGatingProblem& problem) noexcept {
-    return problem.heads == 32 && problem.input_rows == 2048;
 }
 
 bool schedule_uses_mma(Bf16GdnGatingScheduleId schedule) noexcept {
@@ -85,7 +75,8 @@ bool schedule_uses_mma(Bf16GdnGatingScheduleId schedule) noexcept {
 }
 
 std::int32_t mma_tile_cols(const Bf16GdnGatingProblem& problem) noexcept {
-    return is_35(problem) ? 64 : 128;
+    (void)problem;
+    return 128;
 }
 
 std::int32_t schedule_split_k(Bf16GdnGatingScheduleId schedule) {
@@ -121,63 +112,32 @@ bool cooperative_grid_is_resident(Bf16GdnGatingScheduleId schedule, std::int32_t
 }
 
 bool cooperative_27_grid_is_resident(Bf16GdnGatingScheduleId schedule, std::int32_t cols) noexcept {
-    // CUDA 12.8/sm_86 emits 70 registers for the 256-thread split8 specialization and 74 for the
+    // CUDA 13.0/sm_89 emits 68 registers for the 256-thread split8 specialization and 74 for the
     // 512-thread split4/2 specializations. Together with 40 KiB dynamic shared memory, that admits
-    // two split8 CTAs or one split4/2 CTA per GA102 SM. There are three 16-row tiles per token tile.
+    // two split8 CTAs or one split4/2 CTA per Ada SM. There are three 16-row tiles per token tile.
     const std::int32_t resident_ctas =
-        schedule == Bf16GdnGatingScheduleId::MmaCooperativeSplit8 ? 164 : 82;
+        schedule == Bf16GdnGatingScheduleId::MmaCooperativeSplit8 ? 256 : 128;
     return cooperative_grid_is_resident(schedule, cols, 128, 3, resident_ctas);
-}
-
-bool cooperative_35_grid_is_resident(Bf16GdnGatingScheduleId schedule, std::int32_t cols) noexcept {
-    // BN64 uses 24 KiB of dynamic shared memory and 256 threads. CUDA 12.8/sm_86 emits 88-90
-    // registers for split32, 56 for split16, and 74 for split8/4/2. The resulting GA102 limits
-    // are respectively two, four, and three CTAs per SM across the RTX 3090's 82 SMs.
-    const std::int32_t resident_ctas =
-        schedule == Bf16GdnGatingScheduleId::MmaCooperativeSplit32 ? 164
-        : schedule == Bf16GdnGatingScheduleId::MmaCooperativeSplit16 ? 328
-                                                                     : 246;
-    return cooperative_grid_is_resident(schedule, cols, 64, 2, resident_ctas);
 }
 
 bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
                         const Bf16GdnGatingProblem& problem) noexcept {
     if (!bf16_gdn_gating_admits(problem)) { return false; }
-    if (is_27(problem)) {
-        switch (schedule) {
-        case Bf16GdnGatingScheduleId::GemvPairedRows:
-            return problem.cols == 1;
-        case Bf16GdnGatingScheduleId::SmallTSplit10:
-            return problem.cols >= 2 && problem.cols <= 8;
-        case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
-        case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
-        case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
-            return cooperative_27_grid_is_resident(schedule, problem.cols);
-        case Bf16GdnGatingScheduleId::MmaUnsplit:
-            return true;
-        case Bf16GdnGatingScheduleId::SimtWarpRowC4:
-        case Bf16GdnGatingScheduleId::SimtWarpRowC8:
-        case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
-        case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
-            return false;
-        }
-    }
-
     switch (schedule) {
-    case Bf16GdnGatingScheduleId::SimtWarpRowC4:
-        return problem.cols <= 4 * 65'535;
-    case Bf16GdnGatingScheduleId::SimtWarpRowC8:
-        return problem.cols <= 8 * 65'535;
-    case Bf16GdnGatingScheduleId::MmaUnsplit:
-        return true;
-    case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
-    case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
+    case Bf16GdnGatingScheduleId::GemvPairedRows:
+        return problem.cols == 1;
+    case Bf16GdnGatingScheduleId::SmallTSplit10:
+        return problem.cols >= 2 && problem.cols <= 8;
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
-        return cooperative_35_grid_is_resident(schedule, problem.cols);
-    case Bf16GdnGatingScheduleId::GemvPairedRows:
-    case Bf16GdnGatingScheduleId::SmallTSplit10:
+        return cooperative_27_grid_is_resident(schedule, problem.cols);
+    case Bf16GdnGatingScheduleId::MmaUnsplit:
+        return true;
+    case Bf16GdnGatingScheduleId::SimtWarpRowC4:
+    case Bf16GdnGatingScheduleId::SimtWarpRowC8:
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
         return false;
     }
     return false;
@@ -214,61 +174,27 @@ void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem&
         bf16_gdn_gating_proj_small_t_split10_launch(x, a_weight, b_weight, A_log, dt_bias,
                                                     scratch.data, scratch.bytes, g, beta, stream);
         return;
-    case Bf16GdnGatingScheduleId::SimtWarpRowC4:
-        bf16_gdn_gating_proj_35_simt_c4_launch(x, a_weight, b_weight, A_log, dt_bias, g, beta,
-                                               stream);
-        return;
-    case Bf16GdnGatingScheduleId::SimtWarpRowC8:
-        bf16_gdn_gating_proj_35_simt_c8_launch(x, a_weight, b_weight, A_log, dt_bias, g, beta,
-                                               stream);
-        return;
-    case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
-        bf16_gdn_gating_proj_35_mma_split32_launch(plan.token_variant, x, a_weight, b_weight, A_log,
-                                                   dt_bias, scratch.data, g, beta, stream);
-        return;
-    case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
-        bf16_gdn_gating_proj_35_mma_split16_launch(plan.token_variant, x, a_weight, b_weight, A_log,
-                                                   dt_bias, scratch.data, g, beta, stream);
-        return;
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
-        if (is_35(problem)) {
-            bf16_gdn_gating_proj_35_mma_split8_launch(plan.token_variant, x, a_weight, b_weight,
-                                                      A_log, dt_bias, scratch.data, g, beta,
-                                                      stream);
-        } else {
-            bf16_gdn_gating_proj_mma_split8_launch(plan.token_variant, x, a_weight, b_weight, A_log,
-                                                   dt_bias, scratch.data, g, beta, stream);
-        }
+        bf16_gdn_gating_proj_mma_split8_launch(plan.token_variant, x, a_weight, b_weight, A_log,
+                                               dt_bias, scratch.data, g, beta, stream);
         return;
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
-        if (is_35(problem)) {
-            bf16_gdn_gating_proj_35_mma_split4_launch(plan.token_variant, x, a_weight, b_weight,
-                                                      A_log, dt_bias, scratch.data, g, beta,
-                                                      stream);
-        } else {
-            bf16_gdn_gating_proj_mma_split4_launch(plan.token_variant, x, a_weight, b_weight, A_log,
-                                                   dt_bias, scratch.data, g, beta, stream);
-        }
+        bf16_gdn_gating_proj_mma_split4_launch(plan.token_variant, x, a_weight, b_weight, A_log,
+                                               dt_bias, scratch.data, g, beta, stream);
         return;
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
-        if (is_35(problem)) {
-            bf16_gdn_gating_proj_35_mma_split2_launch(plan.token_variant, x, a_weight, b_weight,
-                                                      A_log, dt_bias, scratch.data, g, beta,
-                                                      stream);
-        } else {
-            bf16_gdn_gating_proj_mma_split2_launch(plan.token_variant, x, a_weight, b_weight, A_log,
-                                                   dt_bias, scratch.data, g, beta, stream);
-        }
+        bf16_gdn_gating_proj_mma_split2_launch(plan.token_variant, x, a_weight, b_weight, A_log,
+                                               dt_bias, scratch.data, g, beta, stream);
         return;
     case Bf16GdnGatingScheduleId::MmaUnsplit:
-        if (is_35(problem)) {
-            bf16_gdn_gating_proj_35_mma_unsplit_launch(plan.token_variant, x, a_weight, b_weight,
-                                                       A_log, dt_bias, g, beta, stream);
-        } else {
-            bf16_gdn_gating_proj_mma_unsplit_launch(plan.token_variant, x, a_weight, b_weight,
-                                                    A_log, dt_bias, g, beta, stream);
-        }
+        bf16_gdn_gating_proj_mma_unsplit_launch(plan.token_variant, x, a_weight, b_weight, A_log,
+                                                dt_bias, g, beta, stream);
         return;
+    case Bf16GdnGatingScheduleId::SimtWarpRowC4:
+    case Bf16GdnGatingScheduleId::SimtWarpRowC8:
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
+        break;
     }
     throw std::logic_error("BF16 GDN gating: unknown schedule");
 }
@@ -316,8 +242,7 @@ const char* bf16_gdn_gating_schedule_name(Bf16GdnGatingScheduleId schedule) noex
 }
 
 bool bf16_gdn_gating_admits(const Bf16GdnGatingProblem& problem) noexcept {
-    if (problem.cols < 1) { return false; }
-    return is_27(problem) || is_35(problem);
+    return problem.cols >= 1 && is_27(problem);
 }
 
 Bf16GdnGatingPlan bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId schedule,
@@ -341,17 +266,9 @@ Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& probl
         throw std::invalid_argument(
             "BF16 GDN gating: exact problem or column count is not admitted");
     }
-    if (is_27(problem)) {
-        for (const RouteSpec& route : k27Routes) {
-            if (route.cols.contains(problem.cols)) {
-                return bf16_gdn_gating_resolve_candidate(route.schedule, problem);
-            }
-        }
-    } else {
-        for (const RouteSpec& route : k35Routes) {
-            if (route.cols.contains(problem.cols)) {
-                return bf16_gdn_gating_resolve_candidate(route.schedule, problem);
-            }
+    for (const RouteSpec& route : k27Routes) {
+        if (route.cols.contains(problem.cols)) {
+            return bf16_gdn_gating_resolve_candidate(route.schedule, problem);
         }
     }
     throw std::logic_error("BF16 GDN gating: admitted problem has no covering route");
@@ -359,9 +276,7 @@ Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& probl
 
 std::size_t bf16_gdn_gating_capacity_workspace_bytes(std::int32_t max_cols) {
     (void)bf16_gdn_gating_resolve_plan({48, 5120, max_cols});
-    std::size_t maximum = route_capacity(k27Routes, {48, 5120, 1}, max_cols);
-    maximum             = std::max(maximum, route_capacity(k35Routes, {32, 2048, 1}, max_cols));
-    return maximum;
+    return route_capacity(k27Routes, {48, 5120, 1}, max_cols);
 }
 
 void bf16_gdn_gating_execute_plan(const Bf16GdnGatingPlan& plan, const Tensor& x,

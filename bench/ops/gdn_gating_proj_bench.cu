@@ -1,9 +1,9 @@
 // Cold-cache qualification rig for the exact fused BF16 GDN-control projections.
 //
 // Examples:
-//   ./build/bench/ninfer_gdn_gating_proj_bench --35b --candidate auto
-//   ./build/bench/ninfer_gdn_gating_proj_bench --35b \
-//     --candidate mma-split16 -p 128,512,1024
+//   ./build/bench/ninfer_gdn_gating_proj_bench --candidate auto
+//   ./build/bench/ninfer_gdn_gating_proj_bench \
+//     --candidate mma-split4 -p 128,512,1024
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer_bench_common.h"
 #include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.h"
@@ -28,7 +28,6 @@ namespace {
 constexpr std::size_t kDefaultFlushBytes = 256ULL << 20;
 
 struct Options {
-    bool geometry35 = false;
     bool auto_route = true;
     ops::detail::Bf16GdnGatingScheduleId candidate =
         ops::detail::Bf16GdnGatingScheduleId::SimtWarpRowC4;
@@ -107,10 +106,6 @@ ops::detail::Bf16GdnGatingScheduleId parse_candidate(std::string_view raw) {
     using S = ops::detail::Bf16GdnGatingScheduleId;
     if (raw == "gemv-paired") { return S::GemvPairedRows; }
     if (raw == "small-split10") { return S::SmallTSplit10; }
-    if (raw == "simt-c4") { return S::SimtWarpRowC4; }
-    if (raw == "simt-c8") { return S::SimtWarpRowC8; }
-    if (raw == "mma-split32") { return S::MmaCooperativeSplit32; }
-    if (raw == "mma-split16") { return S::MmaCooperativeSplit16; }
     if (raw == "mma-split8") { return S::MmaCooperativeSplit8; }
     if (raw == "mma-split4") { return S::MmaCooperativeSplit4; }
     if (raw == "mma-split2") { return S::MmaCooperativeSplit2; }
@@ -125,9 +120,7 @@ Options parse_args(int argc, char** argv) {
             if (i + 1 >= argc) { throw std::invalid_argument(std::string("missing ") + label); }
             return argv[++i];
         };
-        if (!std::strcmp(argv[i], "--35b")) {
-            opt.geometry35 = true;
-        } else if (!std::strcmp(argv[i], "--candidate")) {
+        if (!std::strcmp(argv[i], "--candidate")) {
             const std::string_view raw = next("candidate");
             opt.auto_route             = raw == "auto";
             if (!opt.auto_route) { opt.candidate = parse_candidate(raw); }
@@ -142,9 +135,8 @@ Options parse_args(int argc, char** argv) {
             if (mib <= 0) { throw std::invalid_argument("flush MiB must be positive"); }
             opt.flush_bytes = static_cast<std::size_t>(mib) << 20;
         } else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
-            std::printf("usage: %s [--35b] [--candidate auto|simt-c4|simt-c8|mma-split32|"
-                        "gemv-paired|small-split10|mma-split16|mma-split8|mma-split4|"
-                        "mma-split2|mma-unsplit] "
+            std::printf("usage: %s [--candidate auto|gemv-paired|small-split10|mma-split8|"
+                        "mma-split4|mma-split2|mma-unsplit] "
                         "[-p 1,2,...] [--warmup N] [--repeat N] [--flush-mib N]\n",
                         argv[0]);
             std::exit(0);
@@ -193,8 +185,8 @@ Timing measure_cold(Launch&& launch, DBuf& flush, int warmup, int repeat) {
 }
 
 void run(const Options& opt, std::int32_t tokens, DBuf& flush) {
-    const std::int32_t heads  = opt.geometry35 ? 32 : 48;
-    const std::int32_t hidden = opt.geometry35 ? 2048 : 5120;
+    constexpr std::int32_t heads  = 48;
+    constexpr std::int32_t hidden = 5120;
     const std::size_t x_elems = static_cast<std::size_t>(hidden) * tokens;
     const std::size_t weight_elems =
         static_cast<std::size_t>(2 * heads) * static_cast<std::size_t>(hidden);
@@ -225,11 +217,7 @@ void run(const Options& opt, std::int32_t tokens, DBuf& flush) {
     WorkspaceArena ws(std::max<std::size_t>(1, workspace_bytes));
     const auto launch = [&](cudaStream_t stream) {
         if (opt.auto_route) {
-            if (opt.geometry35) {
-                ops::gdn_gating_proj(tx, parent, tA_log, tdt_bias, ws, tg, tbeta, stream);
-            } else {
-                ops::gdn_gating_proj(tx, wa, wb, tA_log, tdt_bias, ws, tg, tbeta, stream);
-            }
+            ops::gdn_gating_proj(tx, wa, wb, tA_log, tdt_bias, ws, tg, tbeta, stream);
         } else {
             ops::detail::bf16_gdn_gating_execute_candidate(opt.candidate, tx, wa, wb, tA_log,
                                                            tdt_bias, ws, tg, tbeta, stream);
@@ -240,7 +228,7 @@ void run(const Options& opt, std::int32_t tokens, DBuf& flush) {
     const double useful_flops =
         2.0 * 2.0 * static_cast<double>(heads) * hidden * static_cast<double>(tokens);
     const bool mma = plan.token_variant != ops::detail::Bf16GdnGatingTokenVariant::None;
-    const std::int32_t mma_tile = opt.geometry35 ? 64 : 128;
+    constexpr std::int32_t mma_tile = 128;
     const double executed_cols =
         mma ? static_cast<double>(((tokens + mma_tile - 1) / mma_tile) * mma_tile) : tokens;
     const double executed_flops  = 2.0 * 2.0 * static_cast<double>(heads) * hidden * executed_cols;
@@ -251,8 +239,8 @@ void run(const Options& opt, std::int32_t tokens, DBuf& flush) {
                             2 * out_elems * sizeof(float) + 2 * heads * sizeof(float));
     const double useful_gbs = useful_bytes / sec / 1e9;
 
-    std::printf("%s,%d,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%zu\n", opt.geometry35 ? "35b" : "27b",
-                tokens, ops::detail::bf16_gdn_gating_schedule_name(plan.schedule), timing.median_us,
+    std::printf("27b,%d,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%zu\n", tokens,
+                ops::detail::bf16_gdn_gating_schedule_name(plan.schedule), timing.median_us,
                 timing.min_us, timing.p95_us, useful_tflops, executed_tflops, useful_gbs,
                 plan.workspace_bytes);
 }
