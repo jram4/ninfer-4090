@@ -1,8 +1,12 @@
-# Single-GPU serving performance
+# Historical upstream RTX 5090 serving performance
+
+> Historical evidence only. This report includes inactive checkpoint work and does not define the
+> current Qwen3.6-27B-only RTX 4090 product, dispatch, package, or acceptance baseline. See
+> [RTX 4090 Linux qualification](rtx-4090-linux.md) for current results.
 
 Tested Git revision: `0795169393cab0f2c16246d4bac20dee735dc2a4`.
 
-These measurements characterize the two registered NInfer targets independently on one NVIDIA
+These measurements characterized two upstream NInfer targets independently on one NVIDIA
 GeForce RTX 5090. They cover long-context prefill and baseline decode with MTP disabled, plus
 long-reasoning and cross-scenario decode with MTP enabled.
 

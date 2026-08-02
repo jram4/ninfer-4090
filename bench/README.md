@@ -9,8 +9,11 @@ Correctness and model parity live outside this directory; development rules are 
 ## Build
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNINFER_BUILD_BENCHMARKS=ON
-cmake --build build --parallel --target ninfer_bench
+$HOME/.local/bin/cmake -S . -B build-sm89 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_ARCHITECTURES=89 \
+  -DNINFER_BUILD_BENCHMARKS=ON
+$HOME/.local/bin/cmake --build build-sm89 --parallel 2 --target ninfer_bench
 ```
 
 ## Product benchmark
@@ -64,8 +67,8 @@ Example:
 `--mtp-draft-tokens`; `--lm-head-draft` selects the optimized proposal head. CUDA Graph decode is
 enabled by default.
 
-Use `--text-only` to reject media and omit the vision workspace reservation. This is required to
-fit the full 35B-A3B artifact on a 24 GiB RTX 3090.
+Use `--text-only` to reject media and omit the vision workspace reservation when measuring a
+strictly text-only 27B route.
 
 `--profile-measured` is a benchmark-only profiler boundary. It requires exactly one selected test
 and `-r 1`, synchronizes after warmup, and brackets only the measured repetition with
@@ -109,24 +112,6 @@ cmake --build build --parallel --target ninfer_input_proj_bench
 The four-projection and materialize/copy controls exist only in this benchmark and are not
 production-callable routes.
 
-## 35B W8 input-projection Op benchmark
-
-`ninfer_w8_input_proj_bench` measures the registered 35B-A3B target's W8 Attention
-`[9216,2048]` and GDN
-`[12288,2048]` multi-output Ops. Production writes independent contiguous consumer allocations
-directly. The controls expose each compiled SIMT/MMA candidate plus the semantically equivalent
-parent Linear alone and parent Linear followed by four or two column extracts. Each timed sample is
-preceded by a 256 MiB L2 flush.
-
-```bash
-cmake --build build --parallel --target ninfer_w8_input_proj_bench
-./build/bench/ninfer_w8_input_proj_bench \
-  --op all --t-sweep 1,2,4,8,12,13,16,17,32,64,128,129,256,512,1024 \
-  --warmup 10 --repeat 50 --csv-out profiles/bench/w8_input_proj_final.csv
-```
-
-The executable isolates these Op contracts; end-to-end 35B-A3B measurement uses `ninfer_bench`.
-
 ## Target MTP round benchmark
 
 `ninfer_qwen3_6_27b_mtp_round_bench` measures the registered target's native proposal and
@@ -142,7 +127,7 @@ cmake --build build --parallel --target ninfer_qwen3_6_27b_mtp_round_bench
 
 ## Token-decision Op benchmarks
 
-The G1 benchmark covers the Qwen3.6-35B full physical vocabulary with 248077 valid rows at
+The G1 benchmark covers the Qwen3.6-27B full physical vocabulary with 248077 valid rows at
 `C=1..6`, plus the 131072-row shortlist. Its `--control` route reads the same rotating payload and
 uses the same launch grid without computing argmax, which provides the fixed-work comparison used
 by the benchmark comparison:
@@ -165,10 +150,9 @@ individual routes are suitable for Nsight Compute capture:
 
 ## Pointwise Op benchmarks
 
-The Section 5 benchmarks cover the complete Qwen3.6-35B pointwise matrix. Default invocation runs
-all registered small, established, maximum-video, and maximum-image shapes. `--control` preserves
-the selected kernel topology and payload while replacing the mathematical operation with minimal
-bitwise work:
+The pointwise benchmarks cover the active Qwen3.6-27B routes plus repository-internal numerical
+test shapes. `--control` preserves the selected kernel topology and payload while replacing the
+mathematical operation with minimal bitwise work:
 
 ```bash
 cmake --build build --parallel --target \

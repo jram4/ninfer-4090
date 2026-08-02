@@ -42,9 +42,11 @@ enum class Name : std::size_t {
     PrefillGdn,
     VerifyGdn,
     PrefillChunk,
+#if defined(NINFER_ENABLE_QWEN3_6_35B_A3B)
     SparseMoePrefill,
     SparseMoeSmallT,
     SparseMoeDecode,
+#endif
     Count,
 };
 
@@ -112,9 +114,11 @@ enum class Name : std::size_t {
         "prefill.gdn",
         "verify.gdn",
         "prefill.chunk",
+#if defined(NINFER_ENABLE_QWEN3_6_35B_A3B)
         "sparse_moe.prefill",
         "sparse_moe.small_t",
         "sparse_moe.decode",
+#endif
     };
     static const auto handles = [] {
         std::array<nvtxStringHandle_t, names.size()> out{};

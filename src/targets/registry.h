@@ -3,7 +3,6 @@
 #include "ninfer/types.h"
 #include "runtime/engine/request_memory.h"
 #include <ninfer/targets/qwen3_6_27b/package.h>
-#include <ninfer/targets/qwen3_6_35b_a3b/package.h>
 
 #include <memory>
 #include <variant>
@@ -14,8 +13,7 @@ struct DeviceContext;
 
 namespace targets {
 
-using Qwen3_6_27B    = qwen3_6_27b::Package;
-using Qwen3_6_35BA3B = qwen3_6_35b_a3b::Package;
+using Qwen3_6_27B = qwen3_6_27b::Package;
 
 struct LoadedQwen3_6_27B {
     std::unique_ptr<Qwen3_6_27B::LoadedModel> model;
@@ -46,37 +44,7 @@ struct Qwen3_6_27BInstance {
     Qwen3_6_27BInstance& operator=(const Qwen3_6_27BInstance&) = delete;
 };
 
-struct LoadedQwen3_6_35BA3B {
-    std::unique_ptr<Qwen3_6_35BA3B::LoadedModel> model;
-    Qwen3_6_35BA3B::Frontend frontend;
-
-    explicit LoadedQwen3_6_35BA3B(
-        std::unique_ptr<Qwen3_6_35BA3B::LoadedModel> stable_model);
-    ~LoadedQwen3_6_35BA3B();
-
-    LoadedQwen3_6_35BA3B(const LoadedQwen3_6_35BA3B&)            = delete;
-    LoadedQwen3_6_35BA3B& operator=(const LoadedQwen3_6_35BA3B&) = delete;
-};
-
-struct Qwen3_6_35BA3BInstance {
-    using Package = Qwen3_6_35BA3B;
-
-    std::unique_ptr<LoadedQwen3_6_35BA3B> loaded;
-    runtime::RequestMemory request_memory;
-    const std::uint32_t capacity;
-    std::unique_ptr<Qwen3_6_35BA3B::Program> program;
-
-    Qwen3_6_35BA3BInstance(std::unique_ptr<LoadedQwen3_6_35BA3B> stable_loaded,
-                                  Qwen3_6_35BA3B::SequencePlan sequence_plan,
-                                  DeviceContext& device);
-    ~Qwen3_6_35BA3BInstance();
-
-    Qwen3_6_35BA3BInstance(const Qwen3_6_35BA3BInstance&)            = delete;
-    Qwen3_6_35BA3BInstance& operator=(const Qwen3_6_35BA3BInstance&) = delete;
-};
-
-using ActiveTarget = std::variant<std::unique_ptr<Qwen3_6_27BInstance>,
-                                  std::unique_ptr<Qwen3_6_35BA3BInstance>>;
+using ActiveTarget = std::variant<std::unique_ptr<Qwen3_6_27BInstance>>;
 
 struct ConstructedTarget {
     ActiveTarget active;

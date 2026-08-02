@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>NInfer 3090 Chat</title>
+  <title>NInfer 4090 Chat</title>
   <style>
     :root { color-scheme: dark; font: 15px/1.5 system-ui, sans-serif; background:#0b0d10; color:#e8eaed; }
     * { box-sizing: border-box; }
@@ -36,7 +36,7 @@
 <main>
   <div>
     <header>
-      <h1>NInfer · Qwen3.6-35B-A3B · RTX 3090</h1>
+      <h1>NInfer · Qwen3.6-27B · RTX 4090</h1>
       <span id="status" class="status">connecting…</span>
     </header>
     <div class="stats" aria-live="polite">
@@ -56,7 +56,7 @@
 </main>
 <script>
   const API = 'http://127.0.0.1:8080/v1';
-  const MODEL = 'qwen3.6-35b-a3b';
+  const MODEL = 'qwen3.6-27b';
   const $ = id => document.getElementById(id);
   const messages = [];
   let controller = null;

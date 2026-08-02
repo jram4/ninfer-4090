@@ -214,16 +214,6 @@ Q4Plan q4_rowsplit_resolve_plan(const Q4Problem& problem) {
         throw std::invalid_argument("q4 linear: exact problem or column count is not admitted");
     }
 
-#ifdef _WIN32
-    // CUDA 13.2/MSVC on sm_86 measures R8C4 about 3% faster than R4C4 for this single
-    // predicated T=2 shape. Keep the CUDA 12.8/Linux route unchanged, where R4C4 wins.
-    if (problem.rows == 34816 && problem.k == 5120 && problem.padded_k == 5120 &&
-        problem.cols == 2) {
-        constexpr auto schedule = Q4ScheduleId::SimtR8C4;
-        return {schedule, resolve_variant(schedule, problem)};
-    }
-#endif
-
     for (std::size_t local = 0; local < support->route_count; ++local) {
         const Q4RouteSpec& route = kRouteSpecs[support->route_begin + local];
         if (route.cols.contains(problem.cols)) {

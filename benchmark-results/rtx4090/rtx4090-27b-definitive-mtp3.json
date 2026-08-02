@@ -1,0 +1,296 @@
+{
+  "schema_version": 9,
+  "artifact_type": "ninfer_bench_report",
+  "tool": "ninfer_bench",
+  "command": "build-sm89/bench/ninfer_bench --weights models/qwen3_6_27b.ninfer -p 512 -n 128 --max-ctx 4096 --kv-dtype int8 --warmup 2 --repetitions 5 --mtp-draft-tokens 3 --lm-head-draft --output json --output-file profiles/bench/rtx4090-27b-definitive-mtp3.json",
+  "environment": {"gpu_name": "NVIDIA GeForce RTX 4090", "cuda_runtime_version": "13.0", "cuda_driver_version": "13.0", "device_id": 0},
+  "artifact": {"path": "models/qwen3_6_27b.ninfer", "file_size_bytes": 17495365888},
+  "load": {
+    "target": "qwen3_6_27b",
+    "load_seconds": 6.354078821,
+    "upload_seconds": 5.188750258,
+    "artifact_bytes_read": 17495365888,
+    "host_to_device_bytes": 17482342304,
+    "peak_staging_bytes": 268435456,
+    "tensor_count": 1118,
+    "resource_count": 6
+  },
+  "memory": {
+    "device": 0,
+    "max_context": 4096,
+    "kv_cache": "int8-group64",
+    "weights": {"capacity_bytes": 17482356224, "used_bytes": 17482356224, "peak_used_bytes": 17482356224},
+    "sequence": {"capacity_bytes": 930323968, "used_bytes": 930323968, "peak_used_bytes": 930323968},
+    "workspace": {"capacity_bytes": 2039482112, "used_bytes": 0, "peak_used_bytes": 4751488},
+    "kv_payload_bytes": 147062784
+  },
+  "config": {
+    "max_context": 4096,
+    "prefill_chunk": 1024,
+    "kv_cache": "int8-group64",
+    "mtp_draft_tokens": 3,
+    "proposal_head": "optimized",
+    "use_cuda_graph": true,
+    "text_only": false,
+    "decode_path": "mtp_cuda_graph",
+    "decode_graph_prime": {"primed": true, "output_tokens": 9},
+    "repetitions": 5,
+    "warmup": 2,
+    "corpus_path": "bench/fixtures/bench_corpus.ids",
+    "corpus_tokens": 65536
+  },
+  "tests": [
+    {
+      "label": "pp512",
+      "kind": "pp",
+      "n_prompt": 512,
+      "n_gen": 0,
+      "requested_output_tokens": 1,
+      "prefill_tok_s_mean": 2083.808749,
+      "prefill_tok_s_stddev": 4.612969376,
+      "decode_output_tok_s_mean": null,
+      "decode_output_tok_s_stddev": null,
+      "decode_engine_tok_s_mean": null,
+      "decode_engine_tok_s_stddev": null,
+      "prepare_seconds_mean": 1.088e-06,
+      "prepare_seconds_stddev": 3.361547263e-08,
+      "prefill_seconds_mean": 0.2457048946,
+      "prefill_seconds_stddev": 0.0005444294605,
+      "decode_seconds_mean": null,
+      "decode_seconds_stddev": null,
+      "total_seconds_mean": 0.2457079406,
+      "total_seconds_stddev": 0.00054445279,
+      "workspace_peak_bytes": 90476544,
+      "speculative": {
+        "enabled": true,
+        "draft_window": 3,
+        "rounds": 0,
+        "drafted_tokens": 0,
+        "accepted_tokens": 0,
+        "fallback_steps": 0,
+        "acceptance_rate": null,
+        "acceptance_length": null,
+        "round_latency_ms": null,
+        "accepted_per_position": [0, 0, 0]
+      },
+      "reps": [
+        {
+          "generated_output_tokens": 1,
+          "decode_output_tokens": null,
+          "decode_engine_tokens": null,
+          "timings": {"prepare_seconds": 1.092e-06, "vision_seconds": 0, "prefill_seconds": 0.245090271, "decode_seconds": 0, "total_seconds": 0.245093297},
+          "speculative": {
+            "enabled": true,
+            "draft_window": 3,
+            "rounds": 0,
+            "drafted_tokens": 0,
+            "accepted_tokens": 0,
+            "fallback_steps": 0,
+            "acceptance_rate": null,
+            "acceptance_length": null,
+            "round_latency_ms": null,
+            "accepted_per_position": [0, 0, 0]
+          }
+        },
+        {
+          "generated_output_tokens": 1,
+          "decode_output_tokens": null,
+          "decode_engine_tokens": null,
+          "timings": {"prepare_seconds": 1.052e-06, "vision_seconds": 0, "prefill_seconds": 0.245424406, "decode_seconds": 0, "total_seconds": 0.245427252},
+          "speculative": {
+            "enabled": true,
+            "draft_window": 3,
+            "rounds": 0,
+            "drafted_tokens": 0,
+            "accepted_tokens": 0,
+            "fallback_steps": 0,
+            "acceptance_rate": null,
+            "acceptance_length": null,
+            "round_latency_ms": null,
+            "accepted_per_position": [0, 0, 0]
+          }
+        },
+        {
+          "generated_output_tokens": 1,
+          "decode_output_tokens": null,
+          "decode_engine_tokens": null,
+          "timings": {"prepare_seconds": 1.082e-06, "vision_seconds": 0, "prefill_seconds": 0.2465069, "decode_seconds": 0, "total_seconds": 0.246510027},
+          "speculative": {
+            "enabled": true,
+            "draft_window": 3,
+            "rounds": 0,
+            "drafted_tokens": 0,
+            "accepted_tokens": 0,
+            "fallback_steps": 0,
+            "acceptance_rate": null,
+            "acceptance_length": null,
+            "round_latency_ms": null,
+            "accepted_per_position": [0, 0, 0]
+          }
+        },
+        {
+          "generated_output_tokens": 1,
+          "decode_output_tokens": null,
+          "decode_engine_tokens": null,
+          "timings": {"prepare_seconds": 1.142e-06, "vision_seconds": 0, "prefill_seconds": 0.245953476, "decode_seconds": 0, "total_seconds": 0.245956371},
+          "speculative": {
+            "enabled": true,
+            "draft_window": 3,
+            "rounds": 0,
+            "drafted_tokens": 0,
+            "accepted_tokens": 0,
+            "fallback_steps": 0,
+            "acceptance_rate": null,
+            "acceptance_length": null,
+            "round_latency_ms": null,
+            "accepted_per_position": [0, 0, 0]
+          }
+        },
+        {
+          "generated_output_tokens": 1,
+          "decode_output_tokens": null,
+          "decode_engine_tokens": null,
+          "timings": {"prepare_seconds": 1.072e-06, "vision_seconds": 0, "prefill_seconds": 0.24554942, "decode_seconds": 0, "total_seconds": 0.245552756},
+          "speculative": {
+            "enabled": true,
+            "draft_window": 3,
+            "rounds": 0,
+            "drafted_tokens": 0,
+            "accepted_tokens": 0,
+            "fallback_steps": 0,
+            "acceptance_rate": null,
+            "acceptance_length": null,
+            "round_latency_ms": null,
+            "accepted_per_position": [0, 0, 0]
+          }
+        }
+      ]
+    },
+    {
+      "label": "tg128",
+      "kind": "tg",
+      "n_prompt": 0,
+      "n_gen": 128,
+      "requested_output_tokens": 129,
+      "prefill_tok_s_mean": null,
+      "prefill_tok_s_stddev": null,
+      "decode_output_tok_s_mean": 124.5738823,
+      "decode_output_tok_s_stddev": 0.05754464557,
+      "decode_engine_tok_s_mean": 124.5738823,
+      "decode_engine_tok_s_stddev": 0.05754464557,
+      "prepare_seconds_mean": 1.224e-07,
+      "prepare_seconds_stddev": 8.561541917e-09,
+      "prefill_seconds_mean": null,
+      "prefill_seconds_stddev": null,
+      "decode_seconds_mean": 1.027502872,
+      "decode_seconds_stddev": 0.0004747978496,
+      "total_seconds_mean": 1.050867492,
+      "total_seconds_stddev": 0.0004616454964,
+      "workspace_peak_bytes": 1219552,
+      "speculative": {
+        "enabled": true,
+        "draft_window": 3,
+        "rounds": 215,
+        "drafted_tokens": 645,
+        "accepted_tokens": 420,
+        "fallback_steps": 5,
+        "acceptance_rate": 0.6511627907,
+        "acceptance_length": 2.953488372,
+        "round_latency_ms": 23.89541563,
+        "accepted_per_position": [180, 140, 100]
+      },
+      "reps": [
+        {
+          "generated_output_tokens": 129,
+          "decode_output_tokens": 128,
+          "decode_engine_tokens": 128,
+          "timings": {"prepare_seconds": 1.21e-07, "vision_seconds": 0, "prefill_seconds": 0.023372685, "decode_seconds": 1.027006091, "total_seconds": 1.050407749},
+          "speculative": {
+            "enabled": true,
+            "draft_window": 3,
+            "rounds": 43,
+            "drafted_tokens": 129,
+            "accepted_tokens": 84,
+            "fallback_steps": 1,
+            "acceptance_rate": 0.6511627907,
+            "acceptance_length": 2.953488372,
+            "round_latency_ms": 23.88386258,
+            "accepted_per_position": [36, 28, 20]
+          }
+        },
+        {
+          "generated_output_tokens": 129,
+          "decode_output_tokens": 128,
+          "decode_engine_tokens": 128,
+          "timings": {"prepare_seconds": 1.3e-07, "vision_seconds": 0, "prefill_seconds": 0.023293107, "decode_seconds": 1.027519037, "total_seconds": 1.050841159},
+          "speculative": {
+            "enabled": true,
+            "draft_window": 3,
+            "rounds": 43,
+            "drafted_tokens": 129,
+            "accepted_tokens": 84,
+            "fallback_steps": 1,
+            "acceptance_rate": 0.6511627907,
+            "acceptance_length": 2.953488372,
+            "round_latency_ms": 23.89579156,
+            "accepted_per_position": [36, 28, 20]
+          }
+        },
+        {
+          "generated_output_tokens": 129,
+          "decode_output_tokens": 128,
+          "decode_engine_tokens": 128,
+          "timings": {"prepare_seconds": 1.1e-07, "vision_seconds": 0, "prefill_seconds": 0.023345444, "decode_seconds": 1.027465337, "total_seconds": 1.050840317},
+          "speculative": {
+            "enabled": true,
+            "draft_window": 3,
+            "rounds": 43,
+            "drafted_tokens": 129,
+            "accepted_tokens": 84,
+            "fallback_steps": 1,
+            "acceptance_rate": 0.6511627907,
+            "acceptance_length": 2.953488372,
+            "round_latency_ms": 23.89454272,
+            "accepted_per_position": [36, 28, 20]
+          }
+        },
+        {
+          "generated_output_tokens": 129,
+          "decode_output_tokens": 128,
+          "decode_engine_tokens": 128,
+          "timings": {"prepare_seconds": 1.31e-07, "vision_seconds": 0, "prefill_seconds": 0.023327551, "decode_seconds": 1.028271374, "total_seconds": 1.051628081},
+          "speculative": {
+            "enabled": true,
+            "draft_window": 3,
+            "rounds": 43,
+            "drafted_tokens": 129,
+            "accepted_tokens": 84,
+            "fallback_steps": 1,
+            "acceptance_rate": 0.6511627907,
+            "acceptance_length": 2.953488372,
+            "round_latency_ms": 23.91328777,
+            "accepted_per_position": [36, 28, 20]
+          }
+        },
+        {
+          "generated_output_tokens": 129,
+          "decode_output_tokens": 128,
+          "decode_engine_tokens": 128,
+          "timings": {"prepare_seconds": 1.2e-07, "vision_seconds": 0, "prefill_seconds": 0.023338742, "decode_seconds": 1.027252522, "total_seconds": 1.050620156},
+          "speculative": {
+            "enabled": true,
+            "draft_window": 3,
+            "rounds": 43,
+            "drafted_tokens": 129,
+            "accepted_tokens": 84,
+            "fallback_steps": 1,
+            "acceptance_rate": 0.6511627907,
+            "acceptance_length": 2.953488372,
+            "round_latency_ms": 23.88959353,
+            "accepted_per_position": [36, 28, 20]
+          }
+        }
+      ]
+    }
+  ]
+}

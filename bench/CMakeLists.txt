@@ -31,10 +31,8 @@ ninfer_add_op_bench(ninfer_argmax_bench SOURCES ops/argmax_bench.cu)
 ninfer_add_op_bench(ninfer_causal_conv1d_silu_bench SOURCES ops/causal_conv1d_silu_bench.cu)
 ninfer_add_op_bench(ninfer_linear_op_bench SOURCES ops/linear_op_bench.cu)
 ninfer_add_op_bench(ninfer_input_proj_bench SOURCES ops/input_proj_bench.cu)
-ninfer_add_op_bench(ninfer_w8_input_proj_bench SOURCES ops/w8_input_proj_bench.cu)
 ninfer_add_op_bench(ninfer_gqa_attention_bench SOURCES ops/gqa_attention_bench.cu)
 ninfer_add_op_bench(ninfer_sampling_select_bench SOURCES ops/sampling_select_bench.cu)
-ninfer_add_op_bench(ninfer_sparse_moe_bench SOURCES ops/sparse_moe_bench.cu)
 
 # End-to-end product benchmark: public Engine API and native .ninfer artifacts only.
 add_executable(ninfer_bench targets/qwen3_6_27b/ninfer_bench.cpp targets/qwen3_6_27b/ninfer_bench_support.cpp)

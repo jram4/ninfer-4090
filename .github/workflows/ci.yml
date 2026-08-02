@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  public-tree:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Validate public tree and documentation links
+        run: python3 scripts/check_public_tree.py
+      - name: Check whitespace
+        run: git diff --check "$(git merge-base HEAD origin/master)"..HEAD
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install CPU test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pytest safetensors
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Run portable artifact and report tests
+        run: python -m pytest tests/artifact tests/test_bench_matrix.py

@@ -105,11 +105,12 @@ intermediate artifacts are excluded unless requested or themselves the deliverab
 ## Current product contract
 
 NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU inference performance on
-a small set of explicitly registered checkpoint targets. The current product supports exactly two
-peer targets: `qwen3_6_27b` and `qwen3_6_35b_a3b`. The current implementation is compiled for
-`sm_120a` and tuned and measured on NVIDIA GeForce RTX 5090. Both targets execute Text, image/video
-Vision, MTP, prefix reuse, CLI, OpenAI/Anthropic serving, and measurement through the same public
-`.ninfer` Engine route.
+explicitly registered checkpoint targets. The current product registers exactly one target:
+`qwen3_6_27b`. It is compiled for `sm_89` and tuned and measured on one NVIDIA GeForce RTX 4090
+under Linux. The target executes Text, image/video Vision, MTP, prefix reuse, CLI,
+OpenAI/Anthropic serving, and measurement through the public `.ninfer` Engine route. Source for
+other checkpoints is dormant: it is not compiled, registered, tested, packaged, downloaded, or
+part of the current product contract.
 
 The current workload is one user, one active request, and one GPU. Continuous batching, additional
 checkpoint targets, and retargeting the implementation to another execution platform are outside
@@ -118,15 +119,13 @@ and the local workflow are trusted.
 Requirements derived from a different workload, trust model, or deployment model are out of scope
 until that product contract is explicitly changed.
 
-The two targets are peer compile-time Variants of one identity-free Qwen3.6 family runtime. The
-family owns the shared `SequencePlan<Variant>`, `RequestPlan<Variant>`, and `Program<Variant>`
+The registered target is a compile-time Variant of one identity-free Qwen3.6 family runtime. The
+family owns `SequencePlan<Variant>`, `RequestPlan<Variant>`, and `Program<Variant>`
 algorithms; frontend and output semantics; Text/Vision/MTP schedules; state transactions; workspace
-composition; and CUDA Graph capture/replay mechanics. Each exact package separately owns its
+composition; and CUDA Graph capture/replay mechanics. The exact package owns its
 artifact identity and binding, immutable model view, dimensions/storage facts, three closed
-execution-leaf families, graph frontier data, and Program instance bytes. No mutable state or device
-allocation is shared between Programs, neither target is defined as a delta from the other, and
-there is no runtime family selection or target-dependent branch inside family scheduling. Both
-artifacts embed the same six frontend resources, and a prepared prompt carries no exact-target tag.
+execution-leaf families, graph frontier data, and Program instance bytes. There is no runtime
+family selection or target-dependent branch inside family scheduling.
 
 ## Engineering priorities
 
@@ -154,10 +153,8 @@ routing map, not a mandatory reading list:
 - `docs/performance.md`: published performance methodology and results;
 - `docs/maintainer/artifact-container.md`, `storage-layouts.md`, and `tensor-formats.md`:
   generic `.ninfer` contracts;
-- `docs/maintainer/qwen3.6-27b-artifact.md` and `qwen3.6-35b-a3b-artifact.md`: exact target
-  inventories, conversion, and binding;
-- `docs/maintainer/qwen3.6-27b-model.md` and `qwen3.6-35b-a3b-model.md`: exact model mathematics,
-  dimensions, and state semantics;
+- `docs/maintainer/qwen3.6-27b-artifact.md`: exact target inventory, conversion, and binding;
+- `docs/maintainer/qwen3.6-27b-model.md`: exact model mathematics, dimensions, and state semantics;
 - `docs/maintainer/op-development.md`: Op contracts, implementation ownership, correctness, and
   performance workflow;
 - `include/ninfer/engine.h` and `include/ninfer/types.h`: in-tree C++ product interface.
@@ -182,8 +179,8 @@ them, but must update the corresponding active authorities and affected implemen
 - `src/ops` owns every semantically closed Op implementation, including fused, fixed-shape, and
   device-specialized paths. Op ownership follows the mathematical or state-transition contract,
   not its first model caller or demonstrated cross-target reuse.
-- `src/targets/qwen3_6` owns only the Qwen3.6-family invariants shared by the 27B and 35B-A3B
-  targets: tokenizer/template and output semantics, media preprocessing and MRoPE prompt
+- `src/targets/qwen3_6` owns only the Qwen3.6-family invariants used by the registered 27B target:
+  tokenizer/template and output semantics, media preprocessing and MRoPE prompt
   construction, owning prepared-prompt/output-session types, semantic weight-view schemas, passive
   Vision definitions, and the fixed planning/Program/Text/Vision/MTP/state/workspace/CUDA-Graph
   algorithms. It has no target identity, registry entry, artifact binder, target leaf
@@ -295,13 +292,13 @@ These are conventional project resources, not a checklist of resources every tas
 | Purpose | Path |
 |---|---|
 | repository | current checkout |
-| Python 3.11 | `python3` in the selected maintainer environment |
+| Python 3.11 | `build-sm89/py311/bin/python` in the verified Linux checkout |
 | BF16 source checkpoint | explicit local checkpoint directory |
-| product artifact | `out/qwen3_6_27b.ninfer` |
+| 27B product artifact | `models/qwen3_6_27b.ninfer` |
 | conversion report | `out/qwen3_6_27b.ninfer.conversion.json` |
-| normal build | `build/` |
+| normal build | `build-sm89/` |
 | profiler output | `profiles/ncu/`, `profiles/nsys/`, `profiles/bench/` |
-| hardware/toolchain | RTX 5090, `sm_120a`, CUDA 13.1 |
+| hardware/toolchain | RTX 4090, `sm_89`, CUDA 13.0, GCC/G++ 13, CMake 4.4 |
 
 Use the selected Python 3.11 interpreter explicitly. Do not install or upgrade dependencies unless
 the task requires it. Never select an artifact by glob, modification time, or an unqualified
@@ -311,7 +308,7 @@ do not download or regenerate them unless that work is in scope.
 ```bash
 PYTHON=python3
 MODEL=/path/to/Qwen3.6-27B
-NINFER_WEIGHTS=out/qwen3_6_27b.ninfer
+NINFER_WEIGHTS=models/qwen3_6_27b.ninfer
 ```
 
 ## Commits

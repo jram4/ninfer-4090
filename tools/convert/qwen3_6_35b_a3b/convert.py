@@ -3,7 +3,7 @@
 Canonical invocation::
 
     python -m tools.convert.qwen3_6_35b_a3b.convert \
-      --model /home/neroued/models/llm/qwen/Qwen3.6-35B-A3B/base-hf-bf16 \
+      --model /path/to/Qwen3.6-35B-A3B/base-hf-bf16 \
       --out out/qwen3_6_35b_a3b.ninfer
 
 The target deliberately reuses the measured 27B ranking because both checkpoints
@@ -34,8 +34,7 @@ from . import draft_head, inventory, recipe
 RECIPE_ID = "qwen3_6_35b_a3b-v1"
 ENCODER_PROFILE = "MAXABS_F16_RECIP_RNE_V1"
 GGUF_EVIDENCE_PATH = Path(
-    "/home/neroued/models/llm/qwen/Qwen3.6-35B-A3B/"
-    "gguf-ud-q4_k_m/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+    "/path/to/Qwen3.6-35B-A3B/gguf-ud-q4_k_m/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
 )
 
 _ROOT_CONFIG = {

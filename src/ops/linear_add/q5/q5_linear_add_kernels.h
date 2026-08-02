@@ -9,6 +9,10 @@ namespace ninfer::ops::detail {
 
 void q5_linear_add_gemv_residual_launch(const Tensor& x, const Weight& w, Tensor& residual_out,
                                         cudaStream_t stream);
+void q5_linear_add_gemv_residual_control_launch(const Tensor& x, const Weight& w,
+                                                Tensor& residual_out, cudaStream_t stream);
+void q5_linear_add_gemv_residual_candidate_launch(const Tensor& x, const Weight& w,
+                                                  Tensor& residual_out, cudaStream_t stream);
 void q5_linear_add_mma_r64_c64_launch(Q5KernelVariant variant, const Tensor& x, const Weight& w,
                                       Tensor& residual_out, cudaStream_t stream);
 void q5_linear_add_mma_r64_c128_launch(Q5KernelVariant variant, const Tensor& x, const Weight& w,
