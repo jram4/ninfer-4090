@@ -1,0 +1,40 @@
+name: Benchmark report
+description: Propose or report an RTX 4090 performance result
+title: "bench: "
+labels: [performance]
+body:
+  - type: input
+    id: revision
+    attributes:
+      label: Revision
+      description: Commit SHA used for both control and candidate
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Hardware and toolchain
+      description: GPU, driver, CUDA, compiler, build type, clocks/power policy, and thermal state
+    validations:
+      required: true
+  - type: textarea
+    id: protocol
+    attributes:
+      label: Measurement protocol
+      description: Exact commands, inputs, warmups, repetitions, cache flush, and synchronization
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Control and candidate results
+      description: Include medians, variability, correctness evidence, and end-to-end impact
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: The report contains no model weights, request contents, credentials, or private paths.
+          required: true
