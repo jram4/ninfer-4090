@@ -14,8 +14,10 @@ ninfer::EngineOptions engine_options(const char* artifact) {
     options.artifact_path             = artifact;
     options.max_context               = 4096;
     options.prefill_chunk             = 1024;
+    options.kv_cache                  = ninfer::KvCacheStorage::Int8Group64;
     options.speculative.draft_tokens  = 3;
     options.speculative.proposal_head = ninfer::ProposalHead::Optimized;
+    options.use_cuda_graph            = true;
     return options;
 }
 
