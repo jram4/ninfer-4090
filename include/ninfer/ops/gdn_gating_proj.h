@@ -34,6 +34,7 @@ void gdn_gating_proj(const Tensor& x, const Weight& a_weight, const Weight& b_we
                      const Tensor& A_log, const Tensor& dt_bias, WorkspaceArena& ws, Tensor& g,
                      Tensor& beta, cudaStream_t stream);
 
+#ifdef NINFER_ENABLE_QWEN3_6_35B_A3B
 /**
  * Qwen3.6-35B-A3B exact storage domain. `ab_weight` is one contiguous BF16_CTRL [64,2048]
  * parent whose rows [0,32) and [32,64) are A and B. The implementation consumes those halves
@@ -43,5 +44,6 @@ void gdn_gating_proj(const Tensor& x, const Weight& a_weight, const Weight& b_we
 void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_log,
                      const Tensor& dt_bias, WorkspaceArena& ws, Tensor& g, Tensor& beta,
                      cudaStream_t stream);
+#endif
 
 } // namespace ninfer::ops

@@ -29,9 +29,11 @@ constexpr int kSmallTRowsPerBlock = 4;
 constexpr int kSmallTThreads      = kSmallTRowsPerBlock * 32;
 static_assert(kK % kSmallTKSlice == 0, "small-T K split must divide K");
 
+#ifdef NINFER_ENABLE_QWEN3_6_35B_A3B
 constexpr int k35N           = 32;
 constexpr int k35K           = 2048;
 constexpr int k35LogicalRows = 2 * k35N;
+#endif
 
 template <int TokenTile, int KSlice, int RowsPerBlock>
 __global__ void bf16_gdn_gating_proj_small_t_partial_kernel(
@@ -175,6 +177,7 @@ __global__ void bf16_gdn_gating_proj_gemv_kernel(const __nv_bfloat16* x,
     }
 }
 
+#ifdef NINFER_ENABLE_QWEN3_6_35B_A3B
 template <int ColsPerTile>
 __global__ void bf16_gdn_gating_proj_35_simt_kernel(const __nv_bfloat16* __restrict__ x,
                                                     const __nv_bfloat16* __restrict__ a_weight,
@@ -240,6 +243,7 @@ __global__ void bf16_gdn_gating_proj_35_simt_kernel(const __nv_bfloat16* __restr
         }
     }
 }
+#endif
 
 void require_shape(const Weight& w, const char* name) {
     if (w.n != kN || w.k != kK || w.shape[0] != kN || w.shape[1] != kK) {
@@ -248,12 +252,14 @@ void require_shape(const Weight& w, const char* name) {
     }
 }
 
+#ifdef NINFER_ENABLE_QWEN3_6_35B_A3B
 void require_shape35(const Weight& w, const char* name) {
     if (w.n != k35N || w.k != k35K || w.shape[0] != k35N || w.shape[1] != k35K) {
         throw std::invalid_argument(std::string("gdn_gating_proj: ") + name +
                                     " requires contiguous BF16 [32,2048]");
     }
 }
+#endif
 
 template <class Geometry, int SplitK, int Warps = kBf16GdnWarps>
 void launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
@@ -401,6 +407,7 @@ void bf16_gdn_gating_proj_mma_unsplit_launch(Bf16GdnGatingTokenVariant variant, 
                                                      nullptr, g, beta, stream);
 }
 
+#ifdef NINFER_ENABLE_QWEN3_6_35B_A3B
 template <int ColsPerTile>
 void launch_35_simt(const Tensor& x, const Weight& a_weight, const Weight& b_weight,
                     const Tensor& A_log, const Tensor& dt_bias, Tensor& g, Tensor& beta,
@@ -496,5 +503,6 @@ void bf16_gdn_gating_proj_35_mma_unsplit_launch(Bf16GdnGatingTokenVariant varian
     launch_bf16_prefill_mma<Bf16Gdn35Geometry, 1, 8>(variant, x, a_weight, b_weight, A_log, dt_bias,
                                                      nullptr, g, beta, stream);
 }
+#endif
 
 } // namespace ninfer::ops::detail

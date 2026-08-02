@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the fixed two-target serving corpus performance evaluation."""
+"""Run the fixed Qwen3.6-27B serving-corpus performance evaluation."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = REPO_ROOT / "examples/cli/manifest.json"
 
 TARGET_MODEL_IDS = {
-    "qwen3_6_35b_a3b": "qwen3.6-35b-a3b",
     "qwen3_6_27b": "qwen3.6-27b",
 }
 TARGET_ORDER = tuple(TARGET_MODEL_IDS)

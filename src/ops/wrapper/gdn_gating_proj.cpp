@@ -27,6 +27,7 @@ void require_bf16_weight(const Weight& w, std::int32_t rows, std::int32_t input_
     }
 }
 
+#ifdef NINFER_ENABLE_QWEN3_6_35B_A3B
 Weight bf16_row_view(const Weight& parent, std::int32_t row_begin, std::int32_t rows) {
     const std::size_t row_bytes = static_cast<std::size_t>(parent.k) * sizeof(std::uint16_t);
     const auto* data            = static_cast<const std::uint8_t*>(parent.qdata) +
@@ -40,6 +41,7 @@ Weight bf16_row_view(const Weight& parent, std::int32_t row_begin, std::int32_t 
     view.n               = rows;
     return view;
 }
+#endif
 
 void require_vector_tensor(const Tensor& t, DType dtype, std::int32_t n0, const char* op,
                            const char* name) {
@@ -79,6 +81,7 @@ void gdn_gating_proj(const Tensor& x, const Weight& a_weight, const Weight& b_we
     detail::bf16_gdn_gating_dispatch(x, a_weight, b_weight, A_log, dt_bias, ws, g, beta, stream);
 }
 
+#ifdef NINFER_ENABLE_QWEN3_6_35B_A3B
 void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_log,
                      const Tensor& dt_bias, WorkspaceArena& ws, Tensor& g, Tensor& beta,
                      cudaStream_t stream) {
@@ -95,5 +98,6 @@ void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_l
     const Weight b_weight = bf16_row_view(ab_weight, 32, 32);
     detail::bf16_gdn_gating_dispatch(x, a_weight, b_weight, A_log, dt_bias, ws, g, beta, stream);
 }
+#endif
 
 } // namespace ninfer::ops
