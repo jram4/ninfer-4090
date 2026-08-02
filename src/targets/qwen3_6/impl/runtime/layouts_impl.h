@@ -299,8 +299,8 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         options.speculative.proposal_head == ProposalHead::Optimized) {
         throw std::invalid_argument("optimized proposal head requires MTP");
     }
-    if (device.sm() != 86) {
-        throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 8.6");
+    if (device.sm() != 89) {
+        throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 8.9");
     }
 }
 

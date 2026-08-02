@@ -140,7 +140,7 @@ const char* q4_schedule_name(Q4ScheduleId schedule) {
                "lane_q4x2.decode_scalar_integer."
                "code_sync_vec16_ca.scale_scalar16_shuffle.lb1";
     case Q4ScheduleId::SimtR4C4:
-        return "q4.simt.r4.c4.g16.s2.code_ca.lb1.sm86";
+        return "q4.simt.r4.c4.g16.s2.code_ca.lb1.sm89";
     case Q4ScheduleId::SimtR8C4:
         return "q4.simt.r8.c4.g16.s2.code_ca.lb1";
     case Q4ScheduleId::SimtR8C8:

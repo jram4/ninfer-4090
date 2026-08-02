@@ -1,20 +1,20 @@
 cmake_minimum_required(VERSION 3.28)
 
-# The current implementation is compiled only for sm_86. Set and validate the
+# The current implementation is compiled only for sm_89. Set and validate the
 # architecture before CUDA compiler detection so CMake never injects a generic
 # host-toolchain default or accepts an unsupported target.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 86 CACHE STRING "CUDA architectures to build")
+  set(CMAKE_CUDA_ARCHITECTURES 89 CACHE STRING "CUDA architectures to build")
 endif()
-if(NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "86")
+if(NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "89")
   message(FATAL_ERROR
-    "NInfer supports only CMAKE_CUDA_ARCHITECTURES=86; got "
+    "NInfer supports only CMAKE_CUDA_ARCHITECTURES=89; got "
     "'${CMAKE_CUDA_ARCHITECTURES}'")
 endif()
 
 project(ninfer VERSION 0.2.0 LANGUAGES C CXX CUDA)
 
-set(NINFER_RUNTIME_VERSION "0.2.0-rtx3090-v2" CACHE STRING "Published NInfer runtime revision")
+set(NINFER_RUNTIME_VERSION "0.2.0-rtx4090-v1" CACHE STRING "Published NInfer runtime revision")
 add_compile_definitions(NINFER_RUNTIME_VERSION="${NINFER_RUNTIME_VERSION}")
 
 # --- Global settings ---------------------------------------------------------
@@ -73,7 +73,7 @@ if(WIN32)
 else()
   set(NINFER_CUDART_TARGET CUDA::cudart)
 endif()
-if(WIN32)
+if(WIN32 OR DEFINED VCPKG_TARGET_TRIPLET)
   find_package(FFMPEG REQUIRED)
   add_library(ninfer_ffmpeg_dependencies INTERFACE)
   target_include_directories(ninfer_ffmpeg_dependencies INTERFACE ${FFMPEG_INCLUDE_DIRS})
