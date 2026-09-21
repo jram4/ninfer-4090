@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "recorded_date": "2026-09-21",
+  "engine": {
+    "name": "Cinference",
+    "source_revision": "44e9603cac541afb5bb5e637da4c0e45653e62e3",
+    "upstream_repo_id": "Neroued/ninfer",
+    "upstream_revision": "9e163eee4b8acec21ab0ac765107b6a3f287b217"
+  },
+  "model": {
+    "repo_id": "Dragoy/Swift-Qwen3.8-27B-abliterated-NVFP4-NInfer",
+    "revision": "4c25aa201b412fe3850e7c0c216c42da935aba38",
+    "variant": "Swift, not the non-Swift Huihui recipe"
+  },
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "vram_gib": 32
+  },
+  "profile": {
+    "spec": "mtp",
+    "draft_tokens": 10,
+    "kv_dtype": "k8v4",
+    "max_context": 262144,
+    "max_concurrency": 1,
+    "prefill_chunk": 1024,
+    "lm_head_draft": true,
+    "temperature": 0,
+    "thinking": false,
+    "max_output_tokens": 256
+  },
+  "method": {
+    "workload": "Served deterministic archive recall with six markers at 1%, 10%, 25%, 50%, 75%, and 95% depth.",
+    "sampling": "One cold-prefix request per context checkpoint; values rounded as supplied in the updated measurement log.",
+    "token_counting": "The prompt-token column is the tokenizer-sized request; the server prompt timer reports 40 fewer processed tokens.",
+    "decode_metric": "Native server predicted_per_second: (generated tokens - 1) / decode seconds; excludes prompt processing and request overhead.",
+    "recall_metric": "Correctly recovered synthetic marker values, not a general capability score."
+  },
+  "measurements": [
+    {
+      "prompt_tokens": 8192,
+      "runtime_prompt_tokens": 8152,
+      "prefill_seconds": 0.9,
+      "prefill_tokens_per_second": 9092.7,
+      "decode_tokens_per_second": 450.78,
+      "draft_acceptance_percent": 93.1,
+      "recall_passed": 6,
+      "recall_total": 6
+    },
+    {
+      "prompt_tokens": 32768,
+      "runtime_prompt_tokens": 32728,
+      "prefill_seconds": 4.39,
+      "prefill_tokens_per_second": 7452.6,
+      "decode_tokens_per_second": 432.6,
+      "draft_acceptance_percent": 92.3,
+      "recall_passed": 6,
+      "recall_total": 6
+    },
+    {
+      "prompt_tokens": 131072,
+      "runtime_prompt_tokens": 131032,
+      "prefill_seconds": 32.4,
+      "prefill_tokens_per_second": 4044.2,
+      "decode_tokens_per_second": 364.84,
+      "draft_acceptance_percent": 97.7,
+      "recall_passed": 6,
+      "recall_total": 6
+    },
+    {
+      "prompt_tokens": 260000,
+      "runtime_prompt_tokens": 259960,
+      "prefill_seconds": 106.72,
+      "prefill_tokens_per_second": 2435.9,
+      "decode_tokens_per_second": 299.64,
+      "draft_acceptance_percent": 98.5,
+      "recall_passed": 6,
+      "recall_total": 6
+    }
+  ],
+  "limitations": [
+    "These measurements use the Swift artifact and must not be represented as measurements of the non-Swift Huihui checkpoint.",
+    "The repetitive recall workload has high draft acceptance; ordinary prose can be much slower.",
+    "A prior 260,000-token repeat measured 275.73 tok/s; these are individual observations, not a universal speed guarantee."
+  ]
+}

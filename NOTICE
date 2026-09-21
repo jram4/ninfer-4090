@@ -1,0 +1,48 @@
+Cinference
+https://github.com/satellitedown/cinference
+
+Cinference is derived from NInfer by Neroued and its contributors:
+https://github.com/Neroued/ninfer
+NInfer is distributed under the Apache License, Version 2.0. The original
+LICENSE is retained unchanged in this distribution.
+
+Upstream base commit:
+9e163eee4b8acec21ab0ac765107b6a3f287b217
+Modified source snapshot:
+44e9603cac541afb5bb5e637da4c0e45653e62e3
+
+Modifications by satellitedown for Cinference extend MTP draft windows to ten,
+use capture-derived CUDA Graph topology classes for MTP profiles, and update
+associated round buffers, validation, tests, and documentation. Publication
+changes add fork branding, provenance and measurement scope, correct stale
+range text, make local-path instructions portable, and omit machine-local
+agent automation and unrelated sponsorship configuration. Modified retained
+files carry modification notices. upstream-provenance.json identifies the
+original changed-file set and subsequent publication edits.
+
+The native NInfer binary names, API symbols, and .ninfer format are retained.
+Use of the NInfer name identifies the original project and its interfaces;
+this fork does not imply endorsement by Neroued or other upstream authors.
+
+Vendored dependencies retain their original copyright and license notices:
+- cpp-httplib: third_party/cpp-httplib/LICENSE
+  Copyright (c) 2017 yhirose; MIT License.
+- llama-jinja: third_party/llama-jinja/LICENSE
+  Copyright (c) 2023-2026 The ggml authors; MIT License.
+- nlohmann/json: third_party/nlohmann/LICENSE.MIT
+  Copyright (c) 2013-2025 Niels Lohmann; MIT License.
+- spdlog: third_party/spdlog/LICENSE
+  Copyright (c) 2016 - present, Gabi Melman and spdlog contributors; MIT License.
+  Its bundled fmt code also retains its own copyright and MIT license notices.
+- utf8proc: third_party/utf8proc/LICENSE.md
+  Includes the original Public Software Group and subsequent contributor
+  notices, along with the Unicode data notices reproduced in that file.
+
+The retained upstream model cards credit their source checkpoints, including
+Qwen/Qwen3.6-27B, Qwen/Qwen3.8-27B, and Qwen/Qwen3.6-35B-A3B. The Qwen3.6-27B
+NVFP4 artifact uses fixed packed weights from
+rdtand/Qwen3.6-27B-PrismaSCOUT-Blackwell-NVFP4-BF16-vllm; the Qwen3.8-27B NVFP4
+artifact uses fixed mixed FP8/NVFP4 weights from unsloth/Qwen3.8-27B-NVFP4.
+The original model cards and their additional source/license notices remain
+in model-cards/. No model weights are included in this source distribution.
+Downloaded model artifacts carry their own applicable licenses and notices.

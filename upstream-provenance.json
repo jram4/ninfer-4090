@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "project": "Cinference",
+  "repository": "https://github.com/satellitedown/cinference",
+  "license": "Apache-2.0",
+  "upstream": {
+    "project": "NInfer",
+    "authors": "Neroued and contributors",
+    "repository": "https://github.com/Neroued/ninfer",
+    "base_revision": "9e163eee4b8acec21ab0ac765107b6a3f287b217"
+  },
+  "source_snapshot": {
+    "revision": "44e9603cac541afb5bb5e637da4c0e45653e62e3",
+    "kind": "modified NInfer source snapshot before standalone publication",
+    "modified_paths_relative_to_upstream_base": [
+      "docs/cli.md",
+      "docs/serving.md",
+      "include/ninfer/ops/mtp_round.h",
+      "include/ninfer/types.h",
+      "src/core/decode_graph.cpp",
+      "src/core/decode_graph.h",
+      "src/models/qwen3_5/program/graphs.cpp",
+      "src/models/qwen3_5/program/internal.h",
+      "src/models/qwen3_5/program/planning/startup.cpp",
+      "src/models/qwen3_5/program/round_buffers.h",
+      "src/ops/kernel/mtp_round.cuh",
+      "src/ops/wrapper/mtp_round.cpp",
+      "src/product/speculative_options.h",
+      "tests/ops/test_mtp_round.cpp",
+      "tests/test_ninfer_bench_support.cpp"
+    ]
+  },
+  "modifications": {
+    "by": "satellitedown",
+    "summary": [
+      "Raise the product MTP draft-token cap from five to ten and extend related round buffers, contracts, and coverage.",
+      "Derive MTP CUDA Graph topology classes from captured node-type and kernel-function signatures while separating batch sizes.",
+      "Preserve native binaries, API symbols, .ninfer format, and build organization."
+    ]
+  },
+  "publication": {
+    "modified_paths_relative_to_source_snapshot": [
+      ".gitignore",
+      "AGENTS.md",
+      "README.md",
+      "bench/README.md",
+      "bench/inference/ninfer_bench_support.cpp",
+      "docs/README.md",
+      "docs/cli.md",
+      "docs/performance.md",
+      "docs/performance/qwen3.6-27b.md",
+      "docs/performance/qwen3.6-35b-a3b.md",
+      "docs/performance/qwen3.8-27b.md",
+      "docs/serving.md",
+      "docs/weight-conversion.md",
+      "eval/README.md",
+      "eval/configs/qwen3_6_35b_needle_haystack.yaml",
+      "include/ninfer/ops/mtp_round.h",
+      "include/ninfer/types.h",
+      "model-cards/Qwen3.6-27B-NInfer/README.md",
+      "model-cards/Qwen3.6-27B-nvfp4-NInfer/README.md",
+      "model-cards/Qwen3.6-35B-A3B-NInfer/README.md",
+      "model-cards/Qwen3.8-27B-NInfer/README.md",
+      "model-cards/Qwen3.8-27B-nvfp4-NInfer/README.md",
+      "src/core/decode_graph.cpp",
+      "src/core/decode_graph.h",
+      "src/models/qwen3_5/program/graphs.cpp",
+      "src/models/qwen3_5/program/internal.h",
+      "src/models/qwen3_5/program/planning/startup.cpp",
+      "src/models/qwen3_5/program/round_buffers.h",
+      "src/ops/kernel/mtp_round.cuh",
+      "src/ops/launcher/mtp_round.cu",
+      "src/ops/wrapper/mtp_round.cpp",
+      "src/product/speculative_options.h",
+      "tests/ops/test_mtp_round.cpp",
+      "tests/test_ninfer_bench_support.cpp",
+      "tools/bench/ttft/build_fixtures.py"
+    ],
+    "added_paths": [
+      "NOTICE",
+      "upstream-provenance.json",
+      "results/rtx5090-archive-recall.json"
+    ],
+    "excluded_source_paths": [
+      ".codex/hooks.json",
+      ".codex/hooks/clang_format.py",
+      ".github/FUNDING.yml"
+    ],
+    "excluded_generated_content": [
+      "build outputs",
+      "model weights",
+      "machine-local agent settings",
+      "private runtime logs and profiling output"
+    ],
+    "notes": [
+      "Retained upstream measurement tables and fixture manifests are historical records, not new Cinference measurements.",
+      "Historical tokenizer_dir values in tools/freq_corpus/fixtures/ranking manifests identify upstream data preparation paths; they are not executable setup instructions.",
+      "Product benchmark help and startup error text advertise MTP 1..10 without changing validation semantics.",
+      "Standalone mtp_round and sampling_select microbenchmarks retain their actual 1..5 input limits.",
+      "The local tokenizer default for TTFT fixture generation is models/Qwen3.8-27B; --tokenizer accepts an explicit local directory."
+    ]
+  },
+  "measurement_record": {
+    "path": "results/rtx5090-archive-recall.json",
+    "scope": "Swift checkpoint; deterministic cold-prefix archive recall; thinking off; RTX 5090; K8V4; MTP-10",
+    "not_a_measurement_of": "the non-Swift Huihui model used by fast-long-context-cinference"
+  },
+  "recipe_repository": "https://github.com/satellitedown/fast-long-context-cinference"
+}
