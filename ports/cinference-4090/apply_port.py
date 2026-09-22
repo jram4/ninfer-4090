@@ -301,6 +301,7 @@ target_link_libraries(ninfer_nvfp4_non_rdc PRIVATE ninfer_core CUDA::cudart CUDA
 
     stub = r'''// RTX 4090 / Ada compatibility stubs for Blackwell-only NVFP4 launch routes.
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma_launch.h"
+#include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma_launch.h"
 #include "ops/softmax_attention/dense/causal_cache/prompt_nvfp4_non_rdc_launch.h"
 
 #include <stdexcept>
