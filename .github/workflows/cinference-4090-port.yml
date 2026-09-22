@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: cinference-4090-port
+  cancel-in-progress: true
+
 jobs:
   validate-overlay:
     runs-on: ubuntu-latest
