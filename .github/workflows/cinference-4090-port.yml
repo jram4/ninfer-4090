@@ -21,6 +21,7 @@ jobs:
         with:
           repository: satellitedown/cinference
           ref: 2205806b3e9d12b23673a146eab1d36755ebc3a0
+          fetch-depth: 0
           path: upstream
 
       - name: Syntax-check overlay
