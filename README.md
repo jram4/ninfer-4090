@@ -4,7 +4,14 @@
 
 **Fast local Qwen inference on a single RTX 5090 (32 GB), with 256K context.**
 
-Built on [NInfer](https://github.com/Neroued/ninfer), with **MTP-10 speculative decoding** to generate more tokens per step.
+Built on [NInfer](https://github.com/Neroued/ninfer).
+
+## What changed
+
+- **MTP-10:** increased the speculative draft window from 5 to 10 tokens.
+- **CUDA Graph matching:** identifies MTP graph layouts from captured GPU operations, keeping batch sizes separate.
+- **Larger MTP buffers:** updated buffers and validation for the longer draft rounds.
+- **Ready-to-run setup:** published the Huihui NVFP4 v3 model and a one-menu installer.
 
 ## Run
 
