@@ -5,8 +5,9 @@ Pinned source:
   satellitedown/cinference@2205806b3e9d12b23673a146eab1d36755ebc3a0
 
 The overlay preserves Cinference's MTP-10 and captured-topology CUDA Graph work.
-It retargets the engine to sm_89, uses Ada's native FP8 MMA spelling so K8V4 can
-remain available, and replaces Blackwell-only NVFP4/TMA entry points with
+It retargets the engine to sm_89, uses Ada's native FP8 MMA spelling, replaces
+the Blackwell-only E2M1 conversion helpers with a software-exact Ada codec so
+K8V4 remains available, and replaces Blackwell-only NVFP4/TMA entry points with
 fail-closed stubs. It does not requantize weights.
 """
 
@@ -79,6 +80,123 @@ def main() -> None:
         '"mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e4m3.e4m3.f32 "',
         '"mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "',
     )
+
+    # CUDA exposes the FP4 C++ surface in recent toolkits even when targeting
+    # Ada, but E2M1 conversion PTX is Blackwell-family only. K8V4 needs the
+    # E2M1 *storage codec*, not FP4 Tensor Core MMA, so implement that codec
+    # explicitly on sm_89. E2M1 finite magnitudes are
+    # {0, 0.5, 1, 1.5, 2, 3, 4, 6}; encode uses RN-even + satfinite.
+    replace(
+        "src/ops/linear/nvfp4/nvfp4_codec.cuh",
+        "#include <cuda_fp4.h>\n",
+        "",
+    )
+    replace(
+        "src/ops/linear/nvfp4/nvfp4_codec.cuh",
+        '''__device__ __forceinline__ float2 decode_nvfp4_e2m1x2(std::uint8_t storage) {
+    __nv_fp4x2_e2m1 value;
+    value.__x = storage;
+    return static_cast<float2>(value);
+}''',
+        '''__device__ __forceinline__ float decode_nvfp4_e2m1(std::uint8_t code) {
+    const unsigned magnitude = code & 0x7U;
+    float value = 0.0F;
+    switch (magnitude) {
+    case 0: value = 0.0F; break;
+    case 1: value = 0.5F; break;
+    case 2: value = 1.0F; break;
+    case 3: value = 1.5F; break;
+    case 4: value = 2.0F; break;
+    case 5: value = 3.0F; break;
+    case 6: value = 4.0F; break;
+    default: value = 6.0F; break;
+    }
+    return (code & 0x8U) != 0U ? -value : value;
+}
+
+__device__ __forceinline__ float2 decode_nvfp4_e2m1x2(std::uint8_t storage) {
+    return make_float2(decode_nvfp4_e2m1(storage & 0x0FU),
+                       decode_nvfp4_e2m1((storage >> 4) & 0x0FU));
+}
+
+__device__ __forceinline__ std::uint8_t encode_nvfp4_e2m1(float value) {
+    if (isnan(value)) return 0;
+    const bool negative = signbit(value) && value != 0.0F;
+    const float x = fabsf(value);
+    unsigned magnitude;
+    // Midpoint ties select the even E2M1 code, matching cudaRoundNearest.
+    if (x <= 0.25F) magnitude = 0;
+    else if (x < 0.75F) magnitude = 1;
+    else if (x <= 1.25F) magnitude = 2;
+    else if (x < 1.75F) magnitude = 3;
+    else if (x <= 2.5F) magnitude = 4;
+    else if (x < 3.5F) magnitude = 5;
+    else if (x <= 5.0F) magnitude = 6;
+    else magnitude = 7;
+    return static_cast<std::uint8_t>(magnitude | (negative ? 0x8U : 0U));
+}''',
+    )
+
+    old_pack = '''__device__ __forceinline__ void
+pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint32_t& codes_hi) {
+    asm volatile("{\\n"
+                 ".reg .b8 b0;\\n"
+                 ".reg .b8 b1;\\n"
+                 ".reg .b8 b2;\\n"
+                 ".reg .b8 b3;\\n"
+                 ".reg .b8 b4;\\n"
+                 ".reg .b8 b5;\\n"
+                 ".reg .b8 b6;\\n"
+                 ".reg .b8 b7;\\n"
+                 "cvt.rn.satfinite.e2m1x2.f32 b0, %3, %2;\\n"
+                 "cvt.rn.satfinite.e2m1x2.f32 b1, %5, %4;\\n"
+                 "cvt.rn.satfinite.e2m1x2.f32 b2, %7, %6;\\n"
+                 "cvt.rn.satfinite.e2m1x2.f32 b3, %9, %8;\\n"
+                 "cvt.rn.satfinite.e2m1x2.f32 b4, %11, %10;\\n"
+                 "cvt.rn.satfinite.e2m1x2.f32 b5, %13, %12;\\n"
+                 "cvt.rn.satfinite.e2m1x2.f32 b6, %15, %14;\\n"
+                 "cvt.rn.satfinite.e2m1x2.f32 b7, %17, %16;\\n"
+                 "mov.b32 %0, {b0,b1,b2,b3};\\n"
+                 "mov.b32 %1, {b4,b5,b6,b7};\\n"
+                 "}\\n"
+                 : "=r"(codes_lo), "=r"(codes_hi)
+                 : "f"(values[0].x), "f"(values[0].y), "f"(values[1].x), "f"(values[1].y),
+                   "f"(values[2].x), "f"(values[2].y), "f"(values[3].x), "f"(values[3].y),
+                   "f"(values[4].x), "f"(values[4].y), "f"(values[5].x), "f"(values[5].y),
+                   "f"(values[6].x), "f"(values[6].y), "f"(values[7].x), "f"(values[7].y));
+}'''
+    new_pack = '''__device__ __forceinline__ void
+pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint32_t& codes_hi) {
+    std::uint8_t bytes[8];
+#pragma unroll
+    for (int pair = 0; pair < 8; ++pair) {
+        const std::uint8_t lo = encode_nvfp4_e2m1(values[pair].x);
+        const std::uint8_t hi = encode_nvfp4_e2m1(values[pair].y);
+        bytes[pair] = static_cast<std::uint8_t>(lo | (hi << 4));
+    }
+    codes_lo = static_cast<std::uint32_t>(bytes[0]) |
+               (static_cast<std::uint32_t>(bytes[1]) << 8) |
+               (static_cast<std::uint32_t>(bytes[2]) << 16) |
+               (static_cast<std::uint32_t>(bytes[3]) << 24);
+    codes_hi = static_cast<std::uint32_t>(bytes[4]) |
+               (static_cast<std::uint32_t>(bytes[5]) << 8) |
+               (static_cast<std::uint32_t>(bytes[6]) << 16) |
+               (static_cast<std::uint32_t>(bytes[7]) << 24);
+}'''
+    replace("src/ops/linear/nvfp4/nvfp4_codec.cuh", old_pack, new_pack)
+
+    kv_codec = read("src/ops/kv_cache/nvfp4_group16_codec.cuh")
+    old_decode = '''        __nv_fp4x2_e2m1 encoded;
+        encoded.__x         = bytes[pair];
+        const __half2 value = __hmul2(static_cast<__half2>(encoded), scale2);'''
+    new_decode = '''        const float2 decoded = detail::decode_nvfp4_e2m1x2(bytes[pair]);
+        const __half2 value =
+            __hmul2(__floats2half2_rn(decoded.x, decoded.y), scale2);'''
+    if kv_codec.count(old_decode) != 2:
+        raise RuntimeError(
+            "src/ops/kv_cache/nvfp4_group16_codec.cuh: expected two native FP4 decode sites"
+        )
+    write("src/ops/kv_cache/nvfp4_group16_codec.cuh", kv_codec.replace(old_decode, new_decode))
 
     # Blackwell NVFP4 W4A4 Tensor Core MMA has no Ada equivalent. Keep the
     # symbol compilable so modern Cinference source can build, but make any
@@ -252,6 +370,7 @@ Supported first target:
 - Qwen3.8-27B groupwise Q4/Q5/Q6/Q8/BF16 NInfer artifacts
 - MTP windows 1..10
 - BF16 / INT8 / FP8-K+V4 (K8V4) KV paths
+- software E2M1 pack/decode on Ada for the V4 cache plane
 - single RTX 4090, Linux, CUDA 13.x
 
 Not supported on Ada:
