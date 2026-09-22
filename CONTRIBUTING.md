@@ -1,6 +1,9 @@
-# Contributing to NInfer
+# Contributing to Cinference
 
-NInfer welcomes precise problem reports, reproducible performance evidence, and carefully scoped
+Adapted from NInfer's contributor guide. Modified by satellitedown for Cinference's repository
+and `main` branch; upstream attribution is retained in [NOTICE](NOTICE).
+
+Cinference welcomes precise problem reports, reproducible performance evidence, and carefully scoped
 code contributions. The most useful first contribution is often an Issue that establishes what is
 happening and why it matters. A pull request is an implementation of an agreed change, not the
 place to ask the maintainer to discover the problem, choose its semantics, or redesign its core
@@ -8,7 +11,7 @@ approach.
 
 ## Project scope and decisions
 
-NInfer is an intentionally focused inference engine. Contributions are evaluated against the
+Cinference is an intentionally focused NInfer fork. Contributions are evaluated against the
 supported product described in [`README.md`](README.md), the public documentation map in
 [`docs/README.md`](docs/README.md), and the applicable architecture documents. Broader
 compatibility or generality is not a benefit by itself when it adds a product contract or
@@ -39,7 +42,7 @@ a linked, confirmed Issue may be closed without detailed review.
 A bug report must contain enough information for the maintainer to locate and reason about the
 failure. Include, as applicable:
 
-- the exact NInfer commit or release, artifact source, and recipe when using custom weights;
+- the exact Cinference commit or release, artifact source, and recipe when using custom weights;
 - the GPU, driver, CUDA toolchain, build configuration, and relevant runtime options;
 - the complete command, request, or smallest practical reproduction;
 - the expected behavior and the observed behavior;
@@ -74,8 +77,8 @@ maintainer has accepted both the product direction and the proposed ownership mo
 
 A pull request is appropriate only after its linked Issue has established the problem and the
 maintainer has agreed to its scope and implementation direction. Target pull requests at the
-`master` branch. Before implementation, also review the current `dev` branch to avoid duplicating
-or conflicting with maintainer work that has not yet reached `master`.
+`main` branch of `satellitedown/cinference`. Review open pull requests before implementation
+to avoid duplicating or conflicting with work in progress.
 
 Each pull request must represent one coherent engineering decision:
 

@@ -40,8 +40,10 @@
   },
   "publication": {
     "modified_paths_relative_to_source_snapshot": [
+      ".github/pull_request_template.md",
       ".gitignore",
       "AGENTS.md",
+      "CONTRIBUTING.md",
       "README.md",
       "bench/README.md",
       "bench/inference/ninfer_bench_support.cpp",

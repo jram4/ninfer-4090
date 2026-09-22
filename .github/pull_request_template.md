@@ -1,7 +1,8 @@
 <!--
+Modified by satellitedown for Cinference: link this fork's contributor guidance.
 One PR should complete one agreed change, including its implementation, verification and report.
 Keep independent changes in separate PRs. Follow the applicable verification guidance:
-https://github.com/Neroued/ninfer/blob/master/CONTRIBUTING.md#pull-request-description
+https://github.com/satellitedown/cinference/blob/main/CONTRIBUTING.md#pull-request-description
 -->
 
 ## Problem and scope
