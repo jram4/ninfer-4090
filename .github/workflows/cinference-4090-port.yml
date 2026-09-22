@@ -50,6 +50,7 @@ jobs:
           ! grep -q '__nv_fp4x2_e2m1' src/ops/kv_cache/nvfp4_group16_codec.cuh
           grep -q 'sm89_blackwell_stubs.cu' src/ops/CMakeLists.txt
           test -f src/ops/sm89_blackwell_stubs.cu
+          grep -q 'launch_nvfp4_linear_swiglu_w4a4_tma' src/ops/sm89_blackwell_stubs.cu
           ! grep -q 'nvfp4_w4a4_tma.cu' src/ops/linear/nvfp4/sources.cmake
           ! grep -q 'nvfp4_linear_swiglu_w4a4_tma.cu' src/ops/linear_swiglu/sources.cmake
           ! grep -q 'prompt_nvfp4_non_rdc.cu' src/ops/softmax_attention/sources.cmake
