@@ -311,6 +311,1554 @@ pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint
         "        launch_t4_ada(x, qk_weight, value_z_weight, qk, value, z, stream);",
     )
 
+    # Iteration fixes for Ada (sm_89), ported from the qualified dirty-tree diff.
+    # Every hunk below reproduces a fix that was built and qualified on the RTX 4090:
+    # sequential Q4/Q5 and sparse-MoE fallbacks (PDL/griddepcontrol is sm_90+),
+    # dynamic shared memory for Q8 kernels exceeding the 48 KiB static limit,
+    # fail-closed native NVFP4 weight routes, and Q8 split-K / row-split / grouped /
+    # attention / GDN / pair / add / SwiGLU launches via the typed wrappers.
+    # src/ops/attn_input_proj/nvfp4/nvfp4_attn_input_w4a4.cu: fail-closed native NVFP4 model-weight route.
+    replace(
+        "src/ops/attn_input_proj/nvfp4/nvfp4_attn_input_w4a4.cu",
+        """#include <cuda_bf16.h>
+
+#include <cstdint>
+
+namespace ninfer::ops::detail {
+namespace {""",
+        """#include <cuda_bf16.h>
+
+#include <cstdint>
+#include <stdexcept>
+
+namespace ninfer::ops::detail {
+namespace {""",
+    )
+    replace(
+        "src/ops/attn_input_proj/nvfp4/nvfp4_attn_input_w4a4.cu",
+        """void nvfp4_attn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
+                                  Tensor& k, Tensor& v, Nvfp4W4a4Workspace workspace,
+                                  cudaStream_t stream) {
+    const std::int32_t tokens = x.ne[1];
+    launch_nvfp4_w4a4_quantize(
+        x, weight, workspace,
+        w4a4_tma_route(tokens) ? Nvfp4ScaleLayout::Tiled : Nvfp4ScaleLayout::RowMajor, stream);
+    if (w4a4_tma_route(tokens)) {
+        const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
+        launch_nvfp4_w4a4_tma_attention(
+            workspace.codes, workspace.scales, static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(q.data),
+            static_cast<__nv_bfloat16*>(gate.data), static_cast<__nv_bfloat16*>(k.data),
+            static_cast<__nv_bfloat16*>(v.data), tokens, alpha, stream);
+    } else if (tokens <= 64) {
+        launch_gemm<M32N64>(weight, q, gate, k, v, workspace, tokens, stream);
+    } else if (tokens <= 96) {
+        launch_gemm<M32N128>(weight, q, gate, k, v, workspace, tokens, stream);
+    } else if (tokens <= 128) {
+        launch_gemm<M128N128Pipelined>(weight, q, gate, k, v, workspace, tokens, stream);
+    } else if (tokens <= 192) {
+        launch_gemm<M64N128>(weight, q, gate, k, v, workspace, tokens, stream);
+    } else if (tokens <= 384) {
+        launch_gemm<M128N128Resident>(weight, q, gate, k, v, workspace, tokens, stream);
+    } else if (tokens <= 512) {
+        launch_gemm<M128N128Pipelined>(weight, q, gate, k, v, workspace, tokens, stream);
+    } else {
+        launch_gemm<M128N128Resident>(weight, q, gate, k, v, workspace, tokens, stream);
+    }
+}
+
+} // namespace ninfer::ops::detail""",
+        """void nvfp4_attn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
+                                  Tensor& k, Tensor& v, Nvfp4W4a4Workspace workspace,
+                                  cudaStream_t stream) {
+    (void)x; (void)weight; (void)q; (void)gate; (void)k; (void)v; (void)workspace; (void)stream;
+    throw std::invalid_argument(
+        "Cinference-4090: native NVFP4 attention weights require Blackwell");
+}
+
+} // namespace ninfer::ops::detail""",
+    )
+    # src/ops/attn_input_proj/q8/q8_attn_input_gemm_mma.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/attn_input_proj/q8/q8_attn_input_gemm_mma.cu",
+        """template <class Schedule, bool Full, int Rows, class Output>
+void launch_variant(const Tensor& x, const Weight& weight, Output output, cudaStream_t stream) {
+    const dim3 grid(Rows / Schedule::BM, static_cast<unsigned>(div_up(x.ne[1], Schedule::BN)), 1u);
+    q8_rowsplit_gemm_mma_kernel<Schedule, Full, Q8Epilogue::Store, Output>
+        <<<grid, Schedule::THREADS, 0, stream>>>(static_cast<const __nv_bfloat16*>(x.data),
+                                                 static_cast<const std::uint8_t*>(weight.qdata),
+                                                 static_cast<const std::uint8_t*>(weight.scales),
+                                                 output, Rows, kHidden, x.ne[1], kHidden);
+}
+
+template <class Schedule, int Rows, class Output>""",
+        """template <class Schedule, bool Full, int Rows, class Output>
+void launch_variant(const Tensor& x, const Weight& weight, Output output, cudaStream_t stream) {
+    const dim3 grid(Rows / Schedule::BM, static_cast<unsigned>(div_up(x.ne[1], Schedule::BN)), 1u);
+    launch_q8_rowsplit_gemm_mma<Schedule, Full, Q8Epilogue::Store, Output>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, Rows, kHidden, x.ne[1], kHidden);
+}
+
+template <class Schedule, int Rows, class Output>""",
+    )
+    # src/ops/attn_input_proj/q8/q8_attn_input_gemm_splitk.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/attn_input_proj/q8/q8_attn_input_gemm_splitk.cu",
+        """                                                : 48;
+    using Geometry         = Q8LinearGeometry<Rows, kHidden>;
+    using Schedule         = Q8KSplitDefaultSchedule<TileCols, ActiveCols>;
+    q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule>
+        <<<Rows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output);
+}
+
+template <int ActiveCols>""",
+        """                                                : 48;
+    using Geometry         = Q8LinearGeometry<Rows, kHidden>;
+    using Schedule         = Q8KSplitDefaultSchedule<TileCols, ActiveCols>;
+    launch_q8_ksplit_mma<Geometry, ActiveCols, Schedule, Output>(
+        dim3(Rows / kRowsPerCta), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output);
+}
+
+template <int ActiveCols>""",
+    )
+    replace(
+        "src/ops/attn_input_proj/q8/q8_attn_input_gemm_splitk.cu",
+        """    const TargetOutput output{
+        static_cast<__nv_bfloat16*>(q.data), static_cast<__nv_bfloat16*>(k.data),
+        static_cast<__nv_bfloat16*>(gate.data), static_cast<__nv_bfloat16*>(v.data)};
+    q8_ksplit_grouped_mma_kernel<kHidden, TileCols, KSplits, NGroups, MinBlocks>
+        <<<kTargetRows / kRowsPerCta, KSplits * NGroups * 32, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
+}
+
+template <int TileCols, int KSplits, int NGroups, int MinBlocks>""",
+        """    const TargetOutput output{
+        static_cast<__nv_bfloat16*>(q.data), static_cast<__nv_bfloat16*>(k.data),
+        static_cast<__nv_bfloat16*>(gate.data), static_cast<__nv_bfloat16*>(v.data)};
+    launch_q8_ksplit_grouped_mma<kHidden, TileCols, KSplits, NGroups, MinBlocks, TargetOutput>(
+        dim3(kTargetRows / kRowsPerCta), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
+}
+
+template <int TileCols, int KSplits, int NGroups, int MinBlocks>""",
+    )
+    replace(
+        "src/ops/attn_input_proj/q8/q8_attn_input_gemm_splitk.cu",
+        """    const CompanionOutput output{static_cast<__nv_bfloat16*>(q.data),
+                                 static_cast<__nv_bfloat16*>(k.data),
+                                 static_cast<__nv_bfloat16*>(v.data)};
+    q8_ksplit_grouped_mma_kernel<kHidden, TileCols, KSplits, NGroups, MinBlocks>
+        <<<kCompanionRows / kRowsPerCta, KSplits * NGroups * 32, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
+}
+
+} // namespace""",
+        """    const CompanionOutput output{static_cast<__nv_bfloat16*>(q.data),
+                                 static_cast<__nv_bfloat16*>(k.data),
+                                 static_cast<__nv_bfloat16*>(v.data)};
+    launch_q8_ksplit_grouped_mma<kHidden, TileCols, KSplits, NGroups, MinBlocks,
+                                 CompanionOutput>(
+        dim3(kCompanionRows / kRowsPerCta), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
+}
+
+} // namespace""",
+    )
+    # src/ops/attn_input_proj/q8/q8_dflash2_attn_input.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/attn_input_proj/q8/q8_dflash2_attn_input.cu",
+        """    const Output output{static_cast<__nv_bfloat16*>(q.data), static_cast<__nv_bfloat16*>(k.data),
+                        static_cast<__nv_bfloat16*>(v.data)};
+    constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
+    q8_ksplit_mma_kernel<Geometry, Columns, Schedule, Output, Q8KSplitStoreEpilogue,
+                         Q8KSplitIdentityRows, false, !Exact>
+        <<<kBlocks, Schedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output, Q8KSplitStoreEpilogue{},
+            Q8KSplitIdentityRows{}, x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}""",
+        """    const Output output{static_cast<__nv_bfloat16*>(q.data), static_cast<__nv_bfloat16*>(k.data),
+                        static_cast<__nv_bfloat16*>(v.data)};
+    constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
+    launch_q8_ksplit_mma<Geometry, Columns, Schedule, Output, Q8KSplitStoreEpilogue,
+                         Q8KSplitIdentityRows, false, !Exact>(
+        dim3(kBlocks), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, Q8KSplitStoreEpilogue{},
+        Q8KSplitIdentityRows{}, x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}""",
+    )
+    replace(
+        "src/ops/attn_input_proj/q8/q8_dflash2_attn_input.cu",
+        """                        static_cast<__nv_bfloat16*>(v.data)};
+    const dim3 grid(Geometry::kOutputRows / Schedule::BM,
+                    static_cast<unsigned>(div_up(x.ne[1], Schedule::BN)), 1u);
+    q8_rowsplit_gemm_mma_kernel<Schedule, Full, Q8Epilogue::Store, Output>
+        <<<grid, Schedule::THREADS, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output, Geometry::kOutputRows,
+            Geometry::kInputRows, x.ne[1], Geometry::kInputRows);
+    CUDA_CHECK(cudaGetLastError());
+}""",
+        """                        static_cast<__nv_bfloat16*>(v.data)};
+    const dim3 grid(Geometry::kOutputRows / Schedule::BM,
+                    static_cast<unsigned>(div_up(x.ne[1], Schedule::BN)), 1u);
+    launch_q8_rowsplit_gemm_mma<Schedule, Full, Q8Epilogue::Store, Output>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, Geometry::kOutputRows,
+        Geometry::kInputRows, x.ne[1], Geometry::kInputRows);
+    CUDA_CHECK(cudaGetLastError());
+}""",
+    )
+    # src/ops/dynamic_grouped_conv/q8/q8_dynamic_grouped_conv_add_materialized.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/dynamic_grouped_conv/q8/q8_dynamic_grouped_conv_add_materialized.cu",
+        """    using Geometry            = Q8LinearGeometry<kRows, InputRows>;
+    using Schedule            = Q8KSplitSchedule<Warps, TileColumns, Warps == 8 ? 2 : 3,
+                                                 Q8KSplitScaleAccess::Shared, Activation>;
+    constexpr int SharedBytes = TileColumns > 64 ? sizeof(Q8KSplitSharedStorage<Schedule>) : 0;
+    if constexpr (SharedBytes > 0) {
+        static const cudaError_t attribute = cudaFuncSetAttribute(
+            q8_ksplit_mma_kernel<Geometry, TileColumns, Schedule, Q8ContiguousOutput,
+                                 Q8KSplitStoreEpilogue, Q8KSplitIdentityRows, false, true>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, SharedBytes);
+        CUDA_CHECK(attribute);
+    }
+    const int columns = x.ne[1];
+    Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), kRows};
+    const dim3 grid(kRows / 16, (columns + TileColumns - 1) / TileColumns);
+    q8_ksplit_mma_kernel<Geometry, TileColumns, Schedule, Q8ContiguousOutput, Q8KSplitStoreEpilogue,
+                         Q8KSplitIdentityRows, false, true>
+        <<<grid, Schedule::kThreads, SharedBytes, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output, Q8KSplitStoreEpilogue{},
+            Q8KSplitIdentityRows{}, columns);
+    CUDA_CHECK(cudaGetLastError());
+}""",
+        """    using Geometry            = Q8LinearGeometry<kRows, InputRows>;
+    using Schedule            = Q8KSplitSchedule<Warps, TileColumns, Warps == 8 ? 2 : 3,
+                                                 Q8KSplitScaleAccess::Shared, Activation>;
+    const int columns = x.ne[1];
+    Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), kRows};
+    const dim3 grid(kRows / 16, (columns + TileColumns - 1) / TileColumns);
+    launch_q8_ksplit_mma<Geometry, TileColumns, Schedule, Q8ContiguousOutput,
+                         Q8KSplitStoreEpilogue, Q8KSplitIdentityRows, false, true>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, Q8KSplitStoreEpilogue{},
+        Q8KSplitIdentityRows{}, columns);
+    CUDA_CHECK(cudaGetLastError());
+}""",
+    )
+    # src/ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_w4a4.cu: fail-closed native NVFP4 model-weight route.
+    replace(
+        "src/ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_w4a4.cu",
+        """#include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
+#include "ops/linear/nvfp4/nvfp4_w4a4_tma_launch.h"
+
+namespace ninfer::ops::detail {
+namespace {""",
+        """#include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
+#include "ops/linear/nvfp4/nvfp4_w4a4_tma_launch.h"
+
+#include <stdexcept>
+
+namespace ninfer::ops::detail {
+namespace {""",
+    )
+    replace(
+        "src/ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_w4a4.cu",
+        """void nvfp4_gdn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
+                                 Nvfp4W4a4Workspace workspace, cudaStream_t stream) {
+    const std::int32_t tokens = x.ne[1];
+    launch_nvfp4_w4a4_quantize(
+        x, weight, workspace,
+        w4a4_tma_route(tokens) ? Nvfp4ScaleLayout::Tiled : Nvfp4ScaleLayout::RowMajor, stream);
+    if (w4a4_tma_route(tokens)) {
+        const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
+        launch_nvfp4_w4a4_tma_gdn(
+            workspace.codes, workspace.scales, static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(qkv.data),
+            static_cast<__nv_bfloat16*>(z.data), tokens, alpha, stream);
+    } else if (tokens <= 64) {
+        launch_gemm<M32N64>(weight, qkv, z, workspace, tokens, stream);
+    } else if (tokens <= 96) {
+        launch_gemm<M32N128>(weight, qkv, z, workspace, tokens, stream);
+    } else if (tokens <= 128) {
+        launch_gemm<M128N128Pipelined>(weight, qkv, z, workspace, tokens, stream);
+    } else if (tokens <= 192) {
+        launch_gemm<M64N128>(weight, qkv, z, workspace, tokens, stream);
+    } else {
+        launch_gemm<M128N128Resident>(weight, qkv, z, workspace, tokens, stream);
+    }
+}
+
+} // namespace ninfer::ops::detail""",
+        """void nvfp4_gdn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
+                                 Nvfp4W4a4Workspace workspace, cudaStream_t stream) {
+    (void)x; (void)weight; (void)qkv; (void)z; (void)workspace; (void)stream;
+    throw std::invalid_argument(
+        "Cinference-4090: native NVFP4 GDN weights require Blackwell");
+}
+
+} // namespace ninfer::ops::detail""",
+    )
+    # src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_conv_snapshot.cu: sequential Ada fallback for sm_90+ PDL.
+    replace(
+        "src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_conv_snapshot.cu",
+        """               const GdnConvEpilogue<Publish>& qk_epilogue,
+               const GdnConvEpilogue<Publish>& value_epilogue, Tensor& query, Tensor& value,
+               Tensor& z, cudaStream_t stream) {
+    // The Q4 and Q5 sides read the same activation but write disjoint output/state rows. The
+    // dependent side therefore computes before waiting, then joins the producer at kernel exit.
+    if constexpr (Order == PdlOrder::Q5ThenQ4) {
+        launch_q5_t1<Publish, true, false, false>(x, value_z_weight, value_epilogue, value, z,
+                                                  stream);
+        launch_q4_t1<Publish, false, true, true>(x, qk_weight, qk_epilogue, query, stream);
+    } else {
+        launch_q4_t1<Publish, true, false, false>(x, qk_weight, qk_epilogue, query, stream);
+        launch_q5_t1<Publish, false, true, true>(x, value_z_weight, value_epilogue, value, z,
+                                                 stream);
+    }
+}
+
+template <int Tokens, class Q4Schedule, PdlOrder Order, class Publish>""",
+        """               const GdnConvEpilogue<Publish>& qk_epilogue,
+               const GdnConvEpilogue<Publish>& value_epilogue, Tensor& query, Tensor& value,
+               Tensor& z, cudaStream_t stream) {
+    // Programmatic Dependent Launch requires sm_90+. Ada preserves the same mathematics and
+    // publication ordering by running the disjoint Q4 and Q5 projections sequentially on the
+    // same stream. Order remains a template parameter so the public routing contract is unchanged.
+    (void)Order;
+    launch_q4_t1<Publish, false, false, false>(x, qk_weight, qk_epilogue, query, stream);
+    launch_q5_t1<Publish, false, false, false>(x, value_z_weight, value_epilogue, value, z, stream);
+}
+
+template <int Tokens, class Q4Schedule, PdlOrder Order, class Publish>""",
+    )
+    replace(
+        "src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_conv_snapshot.cu",
+        """                             const GdnConvEpilogue<Publish>& qk_epilogue,
+                             const GdnConvEpilogue<Publish>& value_epilogue, Tensor& query,
+                             Tensor& value, Tensor& z, cudaStream_t stream) {
+    if constexpr (Order == PdlOrder::Q5ThenQ4) {
+        launch_q5_small_t<Tokens, Publish, true, false, false>(x, value_z_weight, value_epilogue,
+                                                               value, z, stream);
+        launch_q4_ksplit<Tokens, Q4Schedule, Publish, false, true, true>(x, qk_weight, qk_epilogue,
+                                                                         query, stream);
+    } else {
+        launch_q4_ksplit<Tokens, Q4Schedule, Publish, true, false, false>(x, qk_weight, qk_epilogue,
+                                                                          query, stream);
+        launch_q5_small_t<Tokens, Publish, false, true, true>(x, value_z_weight, value_epilogue,
+                                                              value, z, stream);
+    }
+}
+
+template <int Tokens, PdlOrder Order, class Publish>""",
+        """                             const GdnConvEpilogue<Publish>& qk_epilogue,
+                             const GdnConvEpilogue<Publish>& value_epilogue, Tensor& query,
+                             Tensor& value, Tensor& z, cudaStream_t stream) {
+    (void)Order;
+    launch_q4_ksplit<Tokens, Q4Schedule, Publish, false, false, false>(
+        x, qk_weight, qk_epilogue, query, stream);
+    launch_q5_small_t<Tokens, Publish, false, false, false>(
+        x, value_z_weight, value_epilogue, value, z, stream);
+}
+
+template <int Tokens, PdlOrder Order, class Publish>""",
+    )
+    # src/ops/gdn_input_proj/q8/q8_gdn_input_gemm_mma.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/gdn_input_proj/q8/q8_gdn_input_gemm_mma.cu",
+        """    static_assert((8192 % Schedule::BM) == 0 && (4096 % Schedule::BM) == 0);
+    const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
+    const dim3 grid(kRows / Schedule::BM, static_cast<unsigned>(div_up(x.ne[1], Schedule::BN)), 1u);
+    q8_rowsplit_gemm_mma_kernel<Schedule, Full, Q8Epilogue::Store, Output>
+        <<<grid, Schedule::THREADS, 0, stream>>>(static_cast<const __nv_bfloat16*>(x.data),
+                                                 static_cast<const std::uint8_t*>(weight.qdata),
+                                                 static_cast<const std::uint8_t*>(weight.scales),
+                                                 output, kRows, kHidden, x.ne[1], kHidden);
+}
+
+} // namespace""",
+        """    static_assert((8192 % Schedule::BM) == 0 && (4096 % Schedule::BM) == 0);
+    const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
+    const dim3 grid(kRows / Schedule::BM, static_cast<unsigned>(div_up(x.ne[1], Schedule::BN)), 1u);
+    launch_q8_rowsplit_gemm_mma<Schedule, Full, Q8Epilogue::Store, Output>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, kRows, kHidden, x.ne[1], kHidden);
+}
+
+} // namespace""",
+    )
+    # src/ops/gdn_input_proj/q8/q8_gdn_input_gemm_splitk.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/gdn_input_proj/q8/q8_gdn_input_gemm_splitk.cu",
+        """    using Schedule = Q8KSplitDefaultSchedule<TileCols, ActiveCols>;
+    static_assert((8192 % kRowsPerCta) == 0 && (4096 % kRowsPerCta) == 0);
+    const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
+    q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule>
+        <<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output);
+}
+
+template <int ActiveCols, class Publish>""",
+        """    using Schedule = Q8KSplitDefaultSchedule<TileCols, ActiveCols>;
+    static_assert((8192 % kRowsPerCta) == 0 && (4096 % kRowsPerCta) == 0);
+    const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
+    launch_q8_ksplit_mma<Geometry, ActiveCols, Schedule, Output>(
+        dim3(kRows / kRowsPerCta), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output);
+}
+
+template <int ActiveCols, class Publish>""",
+    )
+    replace(
+        "src/ops/gdn_input_proj/q8/q8_gdn_input_gemm_splitk.cu",
+        """        },
+        static_cast<__nv_bfloat16*>(z.data),
+    };
+    q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule, Output, Q8GdnSplitKConvEpilogue<Publish>>
+        <<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), ignored_output, epilogue);
+}
+
+template <int ActiveCols>""",
+        """        },
+        static_cast<__nv_bfloat16*>(z.data),
+    };
+    launch_q8_ksplit_mma<Geometry, ActiveCols, Schedule, Output,
+                         Q8GdnSplitKConvEpilogue<Publish>>(
+        dim3(kRows / kRowsPerCta), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), ignored_output, epilogue);
+}
+
+template <int ActiveCols>""",
+    )
+    # src/ops/linear/nvfp4/nvfp4_dispatch.cpp: fail-closed native NVFP4 model-weight route.
+    replace(
+        "src/ops/linear/nvfp4/nvfp4_dispatch.cpp",
+        """void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
+                    WorkspaceArena* workspace, cudaStream_t stream) {
+    validate_nvfp4_weight(weight, "nvfp4 linear");
+    if (x.ne[1] <= 0) throw std::invalid_argument("nvfp4 linear: T must be positive");
+    const auto& shape = resolve_shape(weight.n, weight.k, policy);
+    if (!allows_a4(policy) || !shape.uses_a4(x.ne[1], x.ne[1]))
+        return shape.a16(x, weight, out, stream);
+    if (workspace == nullptr)
+        throw std::invalid_argument("nvfp4 A4 linear requires caller workspace");
+    auto scope         = workspace->scope();
+    const auto scratch = allocate_nvfp4_w4a4_workspace(*workspace, x.ne[1], weight.k);
+    shape.a4(x, weight, out, scratch, stream);
+}
+} // namespace ninfer::ops::detail""",
+        """void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
+                    WorkspaceArena* workspace, cudaStream_t stream) {
+    (void)x; (void)weight; (void)out; (void)policy; (void)workspace; (void)stream;
+    throw std::invalid_argument(
+        "Cinference-4090: native NVFP4 model weights require Blackwell; use a groupwise artifact");
+}
+} // namespace ninfer::ops::detail""",
+    )
+    # src/ops/linear/nvfp4/shapes/n14336_k5120.cu: fail-closed native NVFP4 model-weight route.
+    replace(
+        "src/ops/linear/nvfp4/shapes/n14336_k5120.cu",
+        """}
+
+Nvfp4A4Route select_a4(std::int32_t tokens) {
+    if (tokens >= 1024) return nvfp4_a4_tma_route<Nvfp4GeometryId::N14336K5120>();
+    if (tokens <= 64) return nvfp4_a4_mma_route<Geometry, T32R64>();
+    if (tokens <= 96) return nvfp4_a4_mma_route<Geometry, T32R128>();
+    if (tokens <= 128) return nvfp4_a4_mma_route<Geometry, T128R128Pipelined>();
+    if (tokens <= 192) return nvfp4_a4_mma_route<Geometry, T64R128>();
+    if (tokens <= 384) return nvfp4_a4_mma_route<Geometry, T128R128Resident>();
+    if (tokens <= 512) return nvfp4_a4_mma_route<Geometry, T128R128Pipelined>();
+    return nvfp4_a4_mma_route<Geometry, T128R128Resident>();
+}
+
+bool uses_a4(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 4; }""",
+        """}
+
+Nvfp4A4Route select_a4(std::int32_t tokens) {
+    (void)tokens;
+    throw std::invalid_argument("Cinference-4090: native NVFP4 linear weights require Blackwell");
+}
+
+bool uses_a4(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 4; }""",
+    )
+    # src/ops/linear/nvfp4/shapes/n16384_k5120.cu: fail-closed native NVFP4 model-weight route.
+    replace(
+        "src/ops/linear/nvfp4/shapes/n16384_k5120.cu",
+        """}
+
+Nvfp4A4Route select_a4(std::int32_t tokens) {
+    if (tokens >= 1024) return nvfp4_a4_tma_route<Nvfp4GeometryId::N16384K5120>();
+    if (tokens <= 64) return nvfp4_a4_mma_route<Geometry, T32R64>();
+    if (tokens <= 96) return nvfp4_a4_mma_route<Geometry, T32R128>();
+    if (tokens <= 128) return nvfp4_a4_mma_route<Geometry, T128R128Pipelined>();
+    if (tokens <= 192) return nvfp4_a4_mma_route<Geometry, T64R128>();
+    return nvfp4_a4_mma_route<Geometry, T128R128Resident>();
+}
+
+bool uses_a4(std::int32_t, std::int32_t) { return true; }""",
+        """}
+
+Nvfp4A4Route select_a4(std::int32_t tokens) {
+    (void)tokens;
+    throw std::invalid_argument("Cinference-4090: native NVFP4 linear weights require Blackwell");
+}
+
+bool uses_a4(std::int32_t, std::int32_t) { return true; }""",
+    )
+    # src/ops/linear/nvfp4/shapes/n34816_k5120.cu: fail-closed native NVFP4 model-weight route.
+    replace(
+        "src/ops/linear/nvfp4/shapes/n34816_k5120.cu",
+        """}
+
+Nvfp4A4Route select_a4(std::int32_t tokens) {
+    if (tokens >= 256) return nvfp4_a4_tma_route<Nvfp4GeometryId::N34816K5120>();
+    if (tokens <= 32) return nvfp4_a4_mma_route<Geometry, T32R128>();
+    if (tokens <= 64) return nvfp4_a4_mma_route<Geometry, T64R128>();
+    if (tokens <= 128) return nvfp4_a4_mma_route<Geometry, T128R128Pipelined>();
+    return nvfp4_a4_mma_route<Geometry, T128R128Resident>();
+}
+
+bool uses_a4(std::int32_t, std::int32_t) { return true; }""",
+        """}
+
+Nvfp4A4Route select_a4(std::int32_t tokens) {
+    (void)tokens;
+    throw std::invalid_argument("Cinference-4090: native NVFP4 linear weights require Blackwell");
+}
+
+bool uses_a4(std::int32_t, std::int32_t) { return true; }""",
+    )
+    # src/ops/linear/nvfp4/shapes/n5120_k17408.cu: fail-closed native NVFP4 model-weight route.
+    replace(
+        "src/ops/linear/nvfp4/shapes/n5120_k17408.cu",
+        """}
+
+Nvfp4A4Route select_a4(std::int32_t tokens) {
+    if (tokens >= 1024) return nvfp4_a4_tma_route<Nvfp4GeometryId::N5120K17408>();
+    if (tokens <= 64) return nvfp4_a4_mma_route<Geometry, T32R64>();
+    if (tokens <= 128) return nvfp4_a4_mma_route<Geometry, T32R128>();
+    if (tokens <= 192) return nvfp4_a4_mma_route<Geometry, T64R128>();
+    if (tokens <= 384) return nvfp4_a4_mma_route<Geometry, T128R128Resident>();
+    if (tokens <= 512) return nvfp4_a4_mma_route<Geometry, T128R128Pipelined>();
+    return nvfp4_a4_mma_route<Geometry, T128R128Resident>();
+}
+
+bool uses_a4(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 8; }""",
+        """}
+
+Nvfp4A4Route select_a4(std::int32_t tokens) {
+    (void)tokens;
+    throw std::invalid_argument("Cinference-4090: native NVFP4 linear weights require Blackwell");
+}
+
+bool uses_a4(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 8; }""",
+    )
+    # src/ops/linear/nvfp4/shapes/n5120_k6144.cu: fail-closed native NVFP4 model-weight route.
+    replace(
+        "src/ops/linear/nvfp4/shapes/n5120_k6144.cu",
+        """}
+
+Nvfp4A4Route select_a4(std::int32_t tokens) {
+    if (tokens >= 1024) return nvfp4_a4_tma_route<Nvfp4GeometryId::N5120K6144>();
+    if (tokens <= 64) return nvfp4_a4_mma_route<Geometry, T32R64>();
+    if (tokens <= 128) return nvfp4_a4_mma_route<Geometry, T32R128>();
+    if (tokens <= 192) return nvfp4_a4_mma_route<Geometry, T64R128>();
+    if (tokens <= 384) return nvfp4_a4_mma_route<Geometry, T128R128Resident>();
+    if (tokens <= 512) return nvfp4_a4_mma_route<Geometry, T128R128Pipelined>();
+    return nvfp4_a4_mma_route<Geometry, T128R128Resident>();
+}
+
+bool uses_a4(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 8; }""",
+        """}
+
+Nvfp4A4Route select_a4(std::int32_t tokens) {
+    (void)tokens;
+    throw std::invalid_argument("Cinference-4090: native NVFP4 linear weights require Blackwell");
+}
+
+bool uses_a4(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 8; }""",
+    )
+    # src/ops/linear/q8/q8_ksplit_grouped_mma.cuh: dynamic shared memory + typed launch wrapper.
+    replace(
+        "src/ops/linear/q8/q8_ksplit_grouped_mma.cuh",
+        """#include <cuda_fp16.h>
+
+#include <cstdint>
+
+namespace ninfer::ops::detail {
+
+template <int Hidden, int TileCols, int KSplits, int NGroups, int MinBlocks, class Output,
+          bool AddResidual = false, bool TiledColumns = false>
+__global__ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void q8_ksplit_grouped_mma_kernel(""",
+        """#include <cuda_fp16.h>
+
+#include <cstdint>
+#include <stdexcept>
+#include <utility>
+
+namespace ninfer::ops::detail {
+
+template <int TileCols, int KSplits, int NGroups>
+struct alignas(16) Q8KSplitGroupedSharedStorage {
+    static constexpr int kTileK       = 64;
+    static constexpr int kMmaRows     = 16;
+    static constexpr int kKernelWarps = KSplits * NGroups;
+    static constexpr int kGroupK      = KSplits * kTileK;
+    static constexpr int kWarpCols    = TileCols / NGroups;
+
+    std::uint8_t codes[kMmaRows][kGroupK];
+    __nv_bfloat16 activations[kKernelWarps][kWarpCols * kTileK];
+};
+
+template <int Hidden, int TileCols, int KSplits, int NGroups, int MinBlocks, class Output,
+          bool AddResidual = false, bool TiledColumns = false>
+__global__ __launch_bounds__(KSplits* NGroups * 32, MinBlocks) void q8_ksplit_grouped_mma_kernel(""",
+    )
+    replace(
+        "src/ops/linear/q8/q8_ksplit_grouped_mma.cuh",
+        """    static_assert(TileCols % NGroups == 0 && kWarpCols % 8 == 0);
+    static_assert(Hidden % kGroupK == 0 && kKernelWarps <= 32);
+
+    __shared__ __align__(16) std::uint8_t code_shared[kMmaRows][kGroupK];
+    __shared__ __align__(16) __nv_bfloat16 b_shared[kKernelWarps][kWarpCols * kTileK];
+
+    const int tid        = static_cast<int>(threadIdx.x);
+    const int warp       = tid >> 5;""",
+        """    static_assert(TileCols % NGroups == 0 && kWarpCols % 8 == 0);
+    static_assert(Hidden % kGroupK == 0 && kKernelWarps <= 32);
+
+    extern __shared__ __align__(16) unsigned char shared_raw[];
+    auto& shared = *reinterpret_cast<Q8KSplitGroupedSharedStorage<TileCols, KSplits, NGroups>*>(
+        shared_raw);
+    auto& code_shared = shared.codes;
+    auto& b_shared    = shared.activations;
+
+    const int tid        = static_cast<int>(threadIdx.x);
+    const int warp       = tid >> 5;""",
+    )
+    replace(
+        "src/ops/linear/q8/q8_ksplit_grouped_mma.cuh",
+        """    }
+}
+
+} // namespace ninfer::ops::detail""",
+        """    }
+}
+
+template <int Hidden, int TileCols, int KSplits, int NGroups, int MinBlocks, class Output,
+          bool AddResidual = false, bool TiledColumns = false, class... Args>
+void launch_q8_ksplit_grouped_mma(dim3 grid, cudaStream_t stream, Args&&... args) {
+    constexpr int kDynamicBytes =
+        static_cast<int>(sizeof(Q8KSplitGroupedSharedStorage<TileCols, KSplits, NGroups>));
+    if constexpr (kDynamicBytes > 48 * 1024) {
+        static const cudaError_t attribute = cudaFuncSetAttribute(
+            q8_ksplit_grouped_mma_kernel<Hidden, TileCols, KSplits, NGroups, MinBlocks, Output,
+                                         AddResidual, TiledColumns>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicBytes);
+        if (attribute != cudaSuccess) { throw std::runtime_error(cudaGetErrorString(attribute)); }
+    }
+    q8_ksplit_grouped_mma_kernel<Hidden, TileCols, KSplits, NGroups, MinBlocks, Output,
+                                 AddResidual, TiledColumns>
+        <<<grid, KSplits * NGroups * 32, kDynamicBytes, stream>>>(std::forward<Args>(args)...);
+}
+
+} // namespace ninfer::ops::detail""",
+    )
+    # src/ops/linear/q8/q8_ksplit_launch.cuh: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/linear/q8/q8_ksplit_launch.cuh",
+        """        throw std::invalid_argument("q8 K-split: padded K differs from the registered geometry");
+    }
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), Geometry::kOutputRows};
+    q8_ksplit_mma_kernel<Geometry, ColumnCapacity, Schedule, Q8ContiguousOutput, Epilogue,
+                         Q8KSplitIdentityRows, false, true>
+        <<<Geometry::kOutputRows / Schedule::kRowsPerCta, Schedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output, Epilogue{},
+            Q8KSplitIdentityRows{}, x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}""",
+        """        throw std::invalid_argument("q8 K-split: padded K differs from the registered geometry");
+    }
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), Geometry::kOutputRows};
+    launch_q8_ksplit_mma<Geometry, ColumnCapacity, Schedule, Q8ContiguousOutput, Epilogue,
+                         Q8KSplitIdentityRows, false, true>(
+        dim3(Geometry::kOutputRows / Schedule::kRowsPerCta), stream,
+        static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, Epilogue{},
+        Q8KSplitIdentityRows{}, x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}""",
+    )
+    # src/ops/linear/q8/q8_ksplit_mma.cuh: dynamic shared memory + typed launch wrapper.
+    replace(
+        "src/ops/linear/q8/q8_ksplit_mma.cuh",
+        """#include <cuda_fp16.h>
+
+#include <cstdint>
+#include <type_traits>
+
+namespace ninfer::ops::detail {""",
+        """#include <cuda_fp16.h>
+
+#include <cstdint>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+
+namespace ninfer::ops::detail {""",
+    )
+    replace(
+        "src/ops/linear/q8/q8_ksplit_mma.cuh",
+        """    float partial[Schedule::kKWarps * (Schedule::kTileTokens / 8) * 32 * 4];
+};
+
+struct Q8KSplitIdentityColumns {
+    __device__ __forceinline__ int operator()(int column) const { return column; }
+};""",
+        """    float partial[Schedule::kKWarps * (Schedule::kTileTokens / 8) * 32 * 4];
+};
+
+template <class Schedule>
+inline constexpr int kQ8KSplitDynamicSharedBytes =
+    sizeof(Q8KSplitSharedStorage<Schedule>) > 48 * 1024
+        ? static_cast<int>(sizeof(Q8KSplitSharedStorage<Schedule>))
+        : 0;
+
+struct Q8KSplitIdentityColumns {
+    __device__ __forceinline__ int operator()(int column) const { return column; }
+};""",
+    )
+    replace(
+        "src/ops/linear/q8/q8_ksplit_mma.cuh",
+        """    using SharedStorage = Q8KSplitSharedStorage<Schedule>;
+
+    constexpr bool kDynamicShared = TiledColumns && ActiveCols > 64;
+    __shared__ __align__(
+        16) unsigned char static_shared[kDynamicShared ? 1 : sizeof(SharedStorage)];
+    extern __shared__ __align__(16) unsigned char dynamic_shared[];""",
+        """    using SharedStorage = Q8KSplitSharedStorage<Schedule>;
+
+    constexpr bool kDynamicShared = kQ8KSplitDynamicSharedBytes<Schedule> != 0;
+    __shared__ __align__(
+        16) unsigned char static_shared[kDynamicShared ? 1 : sizeof(SharedStorage)];
+    extern __shared__ __align__(16) unsigned char dynamic_shared[];""",
+    )
+    replace(
+        "src/ops/linear/q8/q8_ksplit_mma.cuh",
+        """                  TiledColumns>(x, codes, scales, output, epilogue, row_policy, columns);
+}
+
+} // namespace ninfer::ops::detail""",
+        """                  TiledColumns>(x, codes, scales, output, epilogue, row_policy, columns);
+}
+
+template <class Geometry, int ActiveCols, class Schedule, class Output,
+          class Epilogue = Q8KSplitStoreEpilogue, class RowPolicy = Q8KSplitIdentityRows,
+          bool DirectPairEpilogue = false, bool TiledColumns = false, class... Args>
+void launch_q8_ksplit_mma(dim3 grid, cudaStream_t stream, Args&&... args) {
+    constexpr int kDynamicBytes = kQ8KSplitDynamicSharedBytes<Schedule>;
+    if constexpr (kDynamicBytes != 0) {
+        static const cudaError_t attribute = cudaFuncSetAttribute(
+            q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule, Output, Epilogue, RowPolicy,
+                                 DirectPairEpilogue, TiledColumns>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicBytes);
+        if (attribute != cudaSuccess) { throw std::runtime_error(cudaGetErrorString(attribute)); }
+    }
+    q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule, Output, Epilogue, RowPolicy,
+                         DirectPairEpilogue, TiledColumns>
+        <<<grid, Schedule::kThreads, kDynamicBytes, stream>>>(std::forward<Args>(args)...);
+}
+
+} // namespace ninfer::ops::detail""",
+    )
+    # src/ops/linear/q8/q8_rowsplit_gemm_mma.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/linear/q8/q8_rowsplit_gemm_mma.cu",
+        """    const dim3 grid(static_cast<unsigned>(div_up(rows, Schedule::BM)),
+                    static_cast<unsigned>(div_up(cols, Schedule::BN)), 1u);
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), rows};
+    q8_rowsplit_gemm_mma_kernel<Schedule, Full><<<grid, Schedule::THREADS, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+        static_cast<const std::uint8_t*>(w.scales), output, rows, k, cols, padded_k);
+    CUDA_CHECK(cudaGetLastError());
+}""",
+        """    const dim3 grid(static_cast<unsigned>(div_up(rows, Schedule::BM)),
+                    static_cast<unsigned>(div_up(cols, Schedule::BN)), 1u);
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), rows};
+    launch_q8_rowsplit_gemm_mma<Schedule, Full, Q8Epilogue::Store, Q8ContiguousOutput>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint8_t*>(w.scales),
+        output, rows, k, cols, padded_k);
+    CUDA_CHECK(cudaGetLastError());
+}""",
+    )
+    # src/ops/linear/q8/q8_rowsplit_gemm_mma.cuh: dynamic shared memory + typed launch wrapper.
+    replace(
+        "src/ops/linear/q8/q8_rowsplit_gemm_mma.cuh",
+        """#include <cuda_fp16.h>
+
+#include <cstdint>
+
+namespace ninfer::ops::detail {""",
+        """#include <cuda_fp16.h>
+
+#include <cstdint>
+#include <stdexcept>
+#include <utility>
+
+namespace ninfer::ops::detail {""",
+    )
+    replace(
+        "src/ops/linear/q8/q8_rowsplit_gemm_mma.cuh",
+        """static_assert(sizeof(Q8Bf16x8Bits) == 16);
+
+// The predicated loads below inherited Cache::ca from cp_async_zfill's default, while the full path
+// a few lines down spells cg. This parameter makes that a choice. It defaults to ca, so adding it
+// changes no instantiation, and it governs the predicated branch only - the full branch keeps its""",
+        """static_assert(sizeof(Q8Bf16x8Bits) == 16);
+
+template <class Cfg>
+struct Q8RowSplitOperandStorage {
+    alignas(16) __nv_bfloat16 weights[Cfg::BM * Cfg::BK];
+    alignas(16) __nv_bfloat16 activations[Cfg::ACTIVATION_STAGES][Cfg::BN * Cfg::BK];
+    alignas(16) std::uint8_t codes[Cfg::BM * Cfg::BK];
+    alignas(16) std::uint8_t scales[Cfg::BM * Cfg::SCALE_CACHE_BYTES];
+};
+
+template <class Cfg, Q8Epilogue Epilogue>
+union alignas(16) Q8RowSplitSharedStorage {
+    Q8RowSplitOperandStorage<Cfg> operands;
+    float projected[Epilogue == Q8Epilogue::Residual ? Cfg::BM * Cfg::BN : 1];
+};
+
+// The predicated loads below inherited Cache::ca from cp_async_zfill's default, while the full path
+// a few lines down spells cg. This parameter makes that a choice. It defaults to ca, so adding it
+// changes no instantiation, and it governs the predicated branch only - the full branch keeps its""",
+    )
+    replace(
+        "src/ops/linear/q8/q8_rowsplit_gemm_mma.cuh",
+        """    static_assert(!kSwiGlu || Cfg::WARPS_M == 1 || Cfg::WARPS_M == 2,
+                  "SwiGLU supports warp-local or shared-memory row pairing");
+
+    struct OperandStorage {
+        alignas(16) __nv_bfloat16 weights[BM * BK];
+        alignas(16) __nv_bfloat16 activations[Cfg::ACTIVATION_STAGES][BN * BK];
+        alignas(16) std::uint8_t codes[BM * BK];
+        alignas(16) std::uint8_t scales[BM * Cfg::SCALE_CACHE_BYTES];
+    };
+
+    union SharedStorage {
+        OperandStorage operands;
+        float projected[Epilogue == Q8Epilogue::Residual ? BM * BN : 1];
+    };
+
+    static_assert(sizeof(SharedStorage) <= 99 * 1024);
+    __shared__ __align__(16) SharedStorage shared;
+    auto& As = shared.operands.weights;
+    auto& Bs = shared.operands.activations;
+    auto& Cr = shared.operands.codes;""",
+        """    static_assert(!kSwiGlu || Cfg::WARPS_M == 1 || Cfg::WARPS_M == 2,
+                  "SwiGLU supports warp-local or shared-memory row pairing");
+
+    using SharedStorage = Q8RowSplitSharedStorage<Cfg, Epilogue>;
+    static_assert(sizeof(SharedStorage) <= 99 * 1024);
+    extern __shared__ __align__(16) unsigned char shared_raw[];
+    auto& shared = *reinterpret_cast<SharedStorage*>(shared_raw);
+    auto& As = shared.operands.weights;
+    auto& Bs = shared.operands.activations;
+    auto& Cr = shared.operands.codes;""",
+    )
+    replace(
+        "src/ops/linear/q8/q8_rowsplit_gemm_mma.cuh",
+        """    }
+}
+
+} // namespace ninfer::ops::detail""",
+        """    }
+}
+
+template <class Cfg, bool Full, Q8Epilogue Epilogue = Q8Epilogue::Store,
+          class Output = Q8ContiguousOutput, class... Args>
+void launch_q8_rowsplit_gemm_mma(dim3 grid, cudaStream_t stream, Args&&... args) {
+    constexpr int kDynamicBytes =
+        static_cast<int>(sizeof(Q8RowSplitSharedStorage<Cfg, Epilogue>));
+    if constexpr (kDynamicBytes > 48 * 1024) {
+        static const cudaError_t attribute = cudaFuncSetAttribute(
+            q8_rowsplit_gemm_mma_kernel<Cfg, Full, Epilogue, Output>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicBytes);
+        if (attribute != cudaSuccess) { throw std::runtime_error(cudaGetErrorString(attribute)); }
+    }
+    q8_rowsplit_gemm_mma_kernel<Cfg, Full, Epilogue, Output>
+        <<<grid, Cfg::THREADS, kDynamicBytes, stream>>>(std::forward<Args>(args)...);
+}
+
+} // namespace ninfer::ops::detail""",
+    )
+    # src/ops/linear/q8/shapes/n2048_k16384.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/linear/q8/shapes/n2048_k16384.cu",
+        """            "q8 grouped K-split: padded K differs from registered geometry");
+    }
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), Geometry::kOutputRows};
+    q8_ksplit_grouped_mma_kernel<Geometry::kInputRows, Capacity, KWarps, TokenGroups, 1>
+        <<<Geometry::kOutputRows / 16, KWarps * TokenGroups * 32, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}
+} // namespace""",
+        """            "q8 grouped K-split: padded K differs from registered geometry");
+    }
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), Geometry::kOutputRows};
+    launch_q8_ksplit_grouped_mma<Geometry::kInputRows, Capacity, KWarps, TokenGroups, 1,
+                                 Q8ContiguousOutput>(
+        dim3(Geometry::kOutputRows / 16), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}
+} // namespace""",
+    )
+    # src/ops/linear/q8/shapes/n5120_k25600.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/linear/q8/shapes/n5120_k25600.cu",
+        """    using Schedule = Q8RowSplitMmaGemmSchedule<Rows, 64, 16, 16, 1, 2, 128, 1>;
+    const dim3 grid(weight.n / Rows, (x.ne[1] + 63) / 64);
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), weight.n};
+    q8_rowsplit_gemm_mma_kernel<Schedule, false><<<grid, Schedule::THREADS, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, weight.n, weight.k, x.ne[1],
+        weight.padded_shape[1]);
+    CUDA_CHECK(cudaGetLastError());""",
+        """    using Schedule = Q8RowSplitMmaGemmSchedule<Rows, 64, 16, 16, 1, 2, 128, 1>;
+    const dim3 grid(weight.n / Rows, (x.ne[1] + 63) / 64);
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), weight.n};
+    launch_q8_rowsplit_gemm_mma<Schedule, false, Q8Epilogue::Store, Q8ContiguousOutput>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, weight.n, weight.k, x.ne[1],
+        weight.padded_shape[1]);
+    CUDA_CHECK(cudaGetLastError());""",
+    )
+    # src/ops/linear_add/nvfp4/nvfp4_linear_add_w4a4.cu: fail-closed native NVFP4 model-weight route.
+    replace(
+        "src/ops/linear_add/nvfp4/nvfp4_linear_add_w4a4.cu",
+        """void nvfp4_linear_add_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& residual,
+                                  Nvfp4W4a4Workspace workspace, cudaStream_t stream) {
+    const std::int32_t tokens = x.ne[1];
+    launch_nvfp4_w4a4_quantize(
+        x, weight, workspace,
+        w4a4_tma_route(tokens) ? Nvfp4ScaleLayout::Tiled : Nvfp4ScaleLayout::RowMajor, stream);
+    const Nvfp4GeometryId problem = resolve_nvfp4_geometry(weight.n, weight.k);
+    if (w4a4_tma_route(tokens)) {
+        const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
+        launch_nvfp4_w4a4_tma_linear_add(problem, workspace.codes, workspace.scales,
+                                         static_cast<const std::uint8_t*>(weight.qdata),
+                                         static_cast<const std::uint8_t*>(weight.scales),
+                                         static_cast<__nv_bfloat16*>(residual.data), tokens, alpha,
+                                         stream);
+        return;
+    }
+    switch (problem) {
+    case Nvfp4GeometryId::N5120K6144:
+        launch_problem<Nvfp4N5120K6144>(weight, residual, workspace, tokens, stream);
+        return;
+    case Nvfp4GeometryId::N5120K17408:
+        launch_problem<Nvfp4N5120K17408>(weight, residual, workspace, tokens, stream);
+        return;
+    case Nvfp4GeometryId::N14336K5120:
+    case Nvfp4GeometryId::N16384K5120:
+    case Nvfp4GeometryId::N34816K5120:
+        break;
+    }
+    throw std::invalid_argument("nvfp4 linear_add: unsupported problem");
+}
+
+} // namespace ninfer::ops::detail""",
+        """void nvfp4_linear_add_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& residual,
+                                  Nvfp4W4a4Workspace workspace, cudaStream_t stream) {
+    (void)x; (void)weight; (void)residual; (void)workspace; (void)stream;
+    throw std::invalid_argument(
+        "Cinference-4090: native NVFP4 linear-add weights require Blackwell");
+}
+
+} // namespace ninfer::ops::detail""",
+    )
+    # src/ops/linear_add/q8/q8_linear_add_gemm_grouped.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/linear_add/q8/q8_linear_add_gemm_grouped.cu",
+        """    constexpr int kTokenGroups = 4;
+    const dim3 grid(5120 / 16, div_up(x.ne[1], kColumns));
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(residual.data), 5120};
+    q8_ksplit_grouped_mma_kernel<K, kColumns, kSplits, kTokenGroups, 1, Q8ContiguousOutput, true,
+                                 true><<<grid, kSplits * kTokenGroups * 32, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+        static_cast<const std::uint8_t*>(w.scales), output, x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}""",
+        """    constexpr int kTokenGroups = 4;
+    const dim3 grid(5120 / 16, div_up(x.ne[1], kColumns));
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(residual.data), 5120};
+    launch_q8_ksplit_grouped_mma<K, kColumns, kSplits, kTokenGroups, 1, Q8ContiguousOutput, true,
+                                 true>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint8_t*>(w.scales),
+        output, x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}""",
+    )
+    # src/ops/linear_add/q8/q8_linear_add_gemm_mma.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/linear_add/q8/q8_linear_add_gemm_mma.cu",
+        """    const dim3 grid(static_cast<unsigned>(div_up(rows, Schedule::BM)),
+                    static_cast<unsigned>(div_up(cols, Schedule::BN)), 1u);
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(residual_out.data), rows};
+    q8_rowsplit_gemm_mma_kernel<Schedule, Full, Q8Epilogue::Residual>
+        <<<grid, Schedule::THREADS, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+            static_cast<const std::uint8_t*>(w.scales), output, rows, k, cols, padded_k);
+}
+
+template <class Schedule>""",
+        """    const dim3 grid(static_cast<unsigned>(div_up(rows, Schedule::BM)),
+                    static_cast<unsigned>(div_up(cols, Schedule::BN)), 1u);
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(residual_out.data), rows};
+    launch_q8_rowsplit_gemm_mma<Schedule, Full, Q8Epilogue::Residual, Q8ContiguousOutput>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint8_t*>(w.scales),
+        output, rows, k, cols, padded_k);
+}
+
+template <class Schedule>""",
+    )
+    # src/ops/linear_add/q8/q8_linear_add_gemm_splitk.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/linear_add/q8/q8_linear_add_gemm_splitk.cu",
+        """    static_assert((kRows % kRowsPerCta) == 0);
+    auto* residual = static_cast<__nv_bfloat16*>(residual_out.data);
+    const Q8ContiguousOutput output{residual, kRows};
+    q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule, Q8ContiguousOutput,
+                         Q8KSplitResidualEpilogue>
+        <<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output, Q8KSplitResidualEpilogue{});
+}
+
+template <int Hidden, std::size_t... Offsets>""",
+        """    static_assert((kRows % kRowsPerCta) == 0);
+    auto* residual = static_cast<__nv_bfloat16*>(residual_out.data);
+    const Q8ContiguousOutput output{residual, kRows};
+    launch_q8_ksplit_mma<Geometry, ActiveCols, Schedule, Q8ContiguousOutput,
+                         Q8KSplitResidualEpilogue>(
+        dim3(kRows / kRowsPerCta), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, Q8KSplitResidualEpilogue{});
+}
+
+template <int Hidden, std::size_t... Offsets>""",
+    )
+    replace(
+        "src/ops/linear_add/q8/q8_linear_add_gemm_splitk.cu",
+        """void launch_medium(const Tensor& x, Tensor& residual_out, const Weight& weight,
+                   cudaStream_t stream) {
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(residual_out.data), kRows};
+    q8_ksplit_grouped_mma_kernel<Hidden, TileCols, KSplits, NGroups, MinBlocks, Q8ContiguousOutput,
+                                 true><<<kRows / kRowsPerCta, KSplits * NGroups * 32, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
+}""",
+        """void launch_medium(const Tensor& x, Tensor& residual_out, const Weight& weight,
+                   cudaStream_t stream) {
+    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(residual_out.data), kRows};
+    launch_q8_ksplit_grouped_mma<Hidden, TileCols, KSplits, NGroups, MinBlocks, Q8ContiguousOutput,
+                                 true>(
+        dim3(kRows / kRowsPerCta), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
+}""",
+    )
+    # src/ops/linear_pair/q8/q8_pair_gemm_concat.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/linear_pair/q8/q8_pair_gemm_concat.cu",
+        """                            static_cast<__nv_bfloat16*>(second_out.data)};
+    const dim3 grid(static_cast<unsigned>(2 * div_up(kRows, Schedule::BM)),
+                    static_cast<unsigned>(div_up(x.ne[1], Schedule::BN)), 1u);
+    q8_rowsplit_gemm_mma_kernel<Schedule, Full, Q8Epilogue::Store, PairOutput>
+        <<<grid, Schedule::THREADS, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(first_weight.qdata),
+            static_cast<const std::uint8_t*>(first_weight.scales), output, 2 * kRows, kHidden,
+            x.ne[1], kHidden);
+}
+
+template <class Schedule>""",
+        """                            static_cast<__nv_bfloat16*>(second_out.data)};
+    const dim3 grid(static_cast<unsigned>(2 * div_up(kRows, Schedule::BM)),
+                    static_cast<unsigned>(div_up(x.ne[1], Schedule::BN)), 1u);
+    launch_q8_rowsplit_gemm_mma<Schedule, Full, Q8Epilogue::Store, PairOutput>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(first_weight.qdata),
+        static_cast<const std::uint8_t*>(first_weight.scales), output, 2 * kRows, kHidden,
+        x.ne[1], kHidden);
+}
+
+template <class Schedule>""",
+    )
+    # src/ops/linear_pair/q8/q8_pair_gemm_splitk.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/linear_pair/q8/q8_pair_gemm_splitk.cu",
+        """    const Q8ContiguousOutput ignored{static_cast<__nv_bfloat16*>(first_out.data), kRows};
+    const Q8PairExactTEpilogue epilogue{static_cast<__nv_bfloat16*>(first_out.data),
+                                        static_cast<__nv_bfloat16*>(second_out.data)};
+    q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule, Q8ContiguousOutput, Q8PairExactTEpilogue,
+                         Q8PairExactTRows><<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), first_codes, first_scales, ignored, epilogue,
+        Q8PairExactTRows{});
+}
+
+template <std::size_t... Offsets>""",
+        """    const Q8ContiguousOutput ignored{static_cast<__nv_bfloat16*>(first_out.data), kRows};
+    const Q8PairExactTEpilogue epilogue{static_cast<__nv_bfloat16*>(first_out.data),
+                                        static_cast<__nv_bfloat16*>(second_out.data)};
+    launch_q8_ksplit_mma<Geometry, ActiveCols, Schedule, Q8ContiguousOutput, Q8PairExactTEpilogue,
+                         Q8PairExactTRows>(
+        dim3(kRows / kRowsPerCta), stream, static_cast<const __nv_bfloat16*>(x.data), first_codes,
+        first_scales, ignored, epilogue, Q8PairExactTRows{});
+}
+
+template <std::size_t... Offsets>""",
+    )
+    replace(
+        "src/ops/linear_pair/q8/q8_pair_gemm_splitk.cu",
+        """    }
+    const PairOutput output{static_cast<__nv_bfloat16*>(first_out.data),
+                            static_cast<__nv_bfloat16*>(second_out.data)};
+    q8_ksplit_grouped_mma_kernel<kHidden, TileCols, KSplits, NGroups, MinBlocks>
+        <<<(2 * kRows) / 16, KSplits * NGroups * 32, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data), first_codes, first_scales, output, x.ne[1]);
+}
+
+} // namespace""",
+        """    }
+    const PairOutput output{static_cast<__nv_bfloat16*>(first_out.data),
+                            static_cast<__nv_bfloat16*>(second_out.data)};
+    launch_q8_ksplit_grouped_mma<kHidden, TileCols, KSplits, NGroups, MinBlocks, PairOutput>(
+        dim3((2 * kRows) / 16), stream, static_cast<const __nv_bfloat16*>(x.data), first_codes,
+        first_scales, output, x.ne[1]);
+}
+
+} // namespace""",
+    )
+    # src/ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4.cu: fail-closed native NVFP4 model-weight route.
+    replace(
+        "src/ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4.cu",
+        """#include <cuda_bf16.h>
+
+#include <cstdint>
+
+namespace ninfer::ops::detail {
+namespace {""",
+        """#include <cuda_bf16.h>
+
+#include <cstdint>
+#include <stdexcept>
+
+namespace ninfer::ops::detail {
+namespace {""",
+    )
+    replace(
+        "src/ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4.cu",
+        """void nvfp4_linear_swiglu_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& out,
+                                     WorkspaceArena& workspace, cudaStream_t stream) {
+    if (x.ne[1] <= M64N128::kBlockM) {
+        launch<M64N128>(x, weight, out, workspace, stream);
+    } else if (x.ne[1] <= M96N128::kBlockM) {
+        launch<M96N128>(x, weight, out, workspace, stream);
+    } else {
+        launch<M128N128>(x, weight, out, workspace, stream);
+    }
+}
+
+} // namespace ninfer::ops::detail""",
+        """void nvfp4_linear_swiglu_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& out,
+                                     WorkspaceArena& workspace, cudaStream_t stream) {
+    (void)x; (void)weight; (void)out; (void)workspace; (void)stream;
+    throw std::invalid_argument(
+        "Cinference-4090: native NVFP4 SwiGLU weights require Blackwell");
+}
+
+} // namespace ninfer::ops::detail""",
+    )
+    # src/ops/linear_swiglu/q8/q8_dflash2_linear_swiglu.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/linear_swiglu/q8/q8_dflash2_linear_swiglu.cu",
+        """    const Q8SwiGluDirectEpilogue epilogue{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
+    const RowPolicy row_policy{};
+    constexpr int kBlocks = kIntermediate / RowPolicy::kOutputRowsPerCta;
+    q8_ksplit_mma_kernel<Geometry, Capacity, Schedule, Q8ContiguousOutput, Q8SwiGluDirectEpilogue,
+                         RowPolicy, true, true><<<kBlocks, Schedule::kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), ignored_output, epilogue, row_policy,
+        x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());""",
+        """    const Q8SwiGluDirectEpilogue epilogue{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
+    const RowPolicy row_policy{};
+    constexpr int kBlocks = kIntermediate / RowPolicy::kOutputRowsPerCta;
+    launch_q8_ksplit_mma<Geometry, Capacity, Schedule, Q8ContiguousOutput,
+                         Q8SwiGluDirectEpilogue, RowPolicy, true, true>(
+        dim3(kBlocks), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), ignored_output, epilogue, row_policy,
+        x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());""",
+    )
+    # src/ops/linear_swiglu/q8/q8_linear_swiglu_gemm_mma.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/linear_swiglu/q8/q8_linear_swiglu_gemm_mma.cu",
+        """    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), out.ne[0]};
+    const dim3 grid(out.ne[0] / (Schedule::BM / 2),
+                    static_cast<unsigned>(div_up(x.ne[1], Schedule::BN)), 1u);
+    q8_rowsplit_gemm_mma_kernel<Schedule, Full, Q8Epilogue::SwiGluSplitHalf>
+        <<<grid, Schedule::THREADS, 0, stream>>>(static_cast<const __nv_bfloat16*>(x.data),
+                                                 static_cast<const std::uint8_t*>(w.qdata),
+                                                 static_cast<const std::uint8_t*>(w.scales), output,
+                                                 w.n, w.k, x.ne[1], w.padded_shape[1]);
+}
+
+template <class Schedule>""",
+        """    const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), out.ne[0]};
+    const dim3 grid(out.ne[0] / (Schedule::BM / 2),
+                    static_cast<unsigned>(div_up(x.ne[1], Schedule::BN)), 1u);
+    launch_q8_rowsplit_gemm_mma<Schedule, Full, Q8Epilogue::SwiGluSplitHalf,
+                                Q8ContiguousOutput>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint8_t*>(w.scales),
+        output, w.n, w.k, x.ne[1], w.padded_shape[1]);
+}
+
+template <class Schedule>""",
+    )
+    # src/ops/linear_swiglu/q8/q8_linear_swiglu_gemm_splitk.cu: Ada dynamic-shared-memory launch wrapper call site.
+    replace(
+        "src/ops/linear_swiglu/q8/q8_linear_swiglu_gemm_splitk.cu",
+        """    const Q8ContiguousOutput ignored_output{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
+    const Q8SwiGluDirectEpilogue epilogue{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
+    const RowPolicy row_policy{};
+    q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule, Q8ContiguousOutput, Q8SwiGluDirectEpilogue,
+                         RowPolicy, true>
+        <<<kIntermediate / RowPolicy::kOutputRowsPerCta, Schedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+            static_cast<const std::uint8_t*>(w.scales), ignored_output, epilogue, row_policy);
+}
+
+template <std::size_t... Offsets>""",
+        """    const Q8ContiguousOutput ignored_output{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
+    const Q8SwiGluDirectEpilogue epilogue{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
+    const RowPolicy row_policy{};
+    launch_q8_ksplit_mma<Geometry, ActiveCols, Schedule, Q8ContiguousOutput,
+                         Q8SwiGluDirectEpilogue, RowPolicy, true>(
+        dim3(kIntermediate / RowPolicy::kOutputRowsPerCta), stream,
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+        static_cast<const std::uint8_t*>(w.scales), ignored_output, epilogue, row_policy);
+}
+
+template <std::size_t... Offsets>""",
+    )
+    # src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu: sequential Ada fallback for sm_90+ PDL.
+    replace(
+        "src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu",
+        """#include "ops/sparse_moe/decode/sparse_moe_decode.h"
+
+#include "core/device.h"
+#include "core/pdl.cuh"
+#include "ops/common/math.cuh"
+#include "ops/common/memory.cuh"
+#include "ops/common/warp.cuh\"""",
+        """#include "ops/sparse_moe/decode/sparse_moe_decode.h"
+
+#include "core/device.h"
+#include "ops/common/math.cuh"
+#include "ops/common/memory.cuh"
+#include "ops/common/warp.cuh\"""",
+    )
+    replace(
+        "src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu",
+        """                                          float* __restrict__ alpha,
+                                          float* __restrict__ shared_scale) {
+    __shared__ float selected_logits[kTopK];
+    if (threadIdx.x == 0) { pdl::trigger_dependents(); }
+    sparse_moe_select_top8_warp(scores, ids, alpha, shared_scale, selected_logits);
+}""",
+        """                                          float* __restrict__ alpha,
+                                          float* __restrict__ shared_scale) {
+    __shared__ float selected_logits[kTopK];
+    sparse_moe_select_top8_warp(scores, ids, alpha, shared_scale, selected_logits);
+}""",
+    )
+    replace(
+        "src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu",
+        """    const int tid  = static_cast<int>(threadIdx.x);
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    if (tid == 0) { pdl::trigger_dependents(); }
+    if (tid < 256) { store_vec(x_shared + tid * 8, load_vec<uint4>(x + tid * 8)); }
+    __syncthreads();""",
+        """    const int tid  = static_cast<int>(threadIdx.x);
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    if (tid < 256) { store_vec(x_shared + tid * 8, load_vec<uint4>(x + tid * 8)); }
+    __syncthreads();""",
+    )
+    replace(
+        "src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu",
+        """    float gate  = 0.0f;
+    float up    = 0.0f;
+    if (warp < kTopK) {
+        pdl::wait_for_dependencies();
+        const int expert   = ids[warp];
+        const int row_base = expert * 1024;
+        dot_two_rows<RoutedCodec, kHidden>(routed_codes, routed_high, routed_scales, row_base + j,""",
+        """    float gate  = 0.0f;
+    float up    = 0.0f;
+    if (warp < kTopK) {
+        const int expert   = ids[warp];
+        const int row_base = expert * 1024;
+        dot_two_rows<RoutedCodec, kHidden>(routed_codes, routed_high, routed_scales, row_base + j,""",
+    )
+    replace(
+        "src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu",
+        """        }
+        __syncthreads();
+
+        constexpr int kRouterPartitions = 4;
+        const int activation_begin      = (token * (kTopK + 1) + path) * kIntermediate;
+        // Routed paths need S2's ids. A shared path is independent only when its output lies
+        // beyond the partial-score prefix that S2 may still read from the lifetime-unioned scratch.
+        const bool must_wait_for_s2 =
+            path < kTopK || activation_begin < tokens * kRouterRows * kRouterPartitions;
+        if constexpr (!Adaptive) {
+            if (must_wait_for_s2) { pdl::wait_for_dependencies(); }
+        }
+        float gate = 0.0f;
+        float up   = 0.0f;
+        if (path < kTopK) {""",
+        """        }
+        __syncthreads();
+
+        float gate = 0.0f;
+        float up   = 0.0f;
+        if (path < kTopK) {""",
+    )
+    replace(
+        "src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu",
+        """    const std::uint8_t* __restrict__ shared_scales, __nv_bfloat16* __restrict__ destination,
+    const char* __restrict__ prefetch_data, unsigned long long prefetch_bytes) {
+    __shared__ float paths[kTopK + 1][Rows];
+    pdl::wait_for_dependencies();
+    const int warp     = static_cast<int>(threadIdx.x) >> 5;
+    const int lane     = static_cast<int>(threadIdx.x) & 31;
+    const int row_base = static_cast<int>(blockIdx.x) * Rows;""",
+        """    const std::uint8_t* __restrict__ shared_scales, __nv_bfloat16* __restrict__ destination,
+    const char* __restrict__ prefetch_data, unsigned long long prefetch_bytes) {
+    __shared__ float paths[kTopK + 1][Rows];
+    const int warp     = static_cast<int>(threadIdx.x) >> 5;
+    const int lane     = static_cast<int>(threadIdx.x) & 31;
+    const int row_base = static_cast<int>(blockIdx.x) * Rows;""",
+    )
+    replace(
+        "src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu",
+        """template <class Codec>
+void launch_d3_dependent_codec(const Tensor& x, const SparseMoeWeights& weights,
+                               const SparseMoeDecodeWorkspace& workspace, cudaStream_t stream) {
+    const auto* input         = static_cast<const __nv_bfloat16*>(x.data);
+    const auto* ids           = static_cast<const int*>(workspace.ids.data);
+    auto* act                 = static_cast<float*>(workspace.scratch.data);""",
+        """template <class Codec>
+void launch_d3_dependent_codec(const Tensor& x, const SparseMoeWeights& weights,
+                               const SparseMoeDecodeWorkspace& workspace, cudaStream_t stream) {
+    // Programmatic Dependent Launch is sm_90+. On Ada, ordinary launches on this stream preserve
+    // the D1 -> D2 -> D3 -> D4 data dependencies exactly, at the cost of pipeline overlap.
+    const auto* input         = static_cast<const __nv_bfloat16*>(x.data);
+    const auto* ids           = static_cast<const int*>(workspace.ids.data);
+    auto* act                 = static_cast<float*>(workspace.scratch.data);""",
+    )
+    replace(
+        "src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu",
+        """    const auto* routed_scales = static_cast<const std::uint8_t*>(weights.routed_gate_up.scales);
+    const auto* shared_codes  = static_cast<const std::uint8_t*>(weights.shared_gate_up.qdata);
+    const auto* shared_scales = static_cast<const std::uint8_t*>(weights.shared_gate_up.scales);
+    CUDA_CHECK(pdl::launch_dependent(
+        {dim3(kIntermediate), dim3(9 * 32), 0, stream}, sparse_moe_d3_nine_warp_kernel<Codec>,
+        input, ids, routed_codes, routed_high, routed_scales, shared_codes, shared_scales, act));
+}
+
+void launch_d2_d3(const Tensor& x, const SparseMoeWeights& weights,""",
+        """    const auto* routed_scales = static_cast<const std::uint8_t*>(weights.routed_gate_up.scales);
+    const auto* shared_codes  = static_cast<const std::uint8_t*>(weights.shared_gate_up.qdata);
+    const auto* shared_scales = static_cast<const std::uint8_t*>(weights.shared_gate_up.scales);
+    sparse_moe_d3_nine_warp_kernel<Codec><<<kIntermediate, 9 * 32, 0, stream>>>(
+        input, ids, routed_codes, routed_high, routed_scales, shared_codes, shared_scales, act);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_d2_d3(const Tensor& x, const SparseMoeWeights& weights,""",
+    )
+    replace(
+        "src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu",
+        """    const auto* shared_codes  = static_cast<const std::uint8_t*>(weights.shared_down.qdata);
+    const auto* shared_scales = static_cast<const std::uint8_t*>(weights.shared_down.scales);
+    auto* output              = static_cast<__nv_bfloat16*>(destination.data);
+    CUDA_CHECK(pdl::launch_dependent(
+        {dim3(kHidden), dim3(9 * 32), 0, stream}, sparse_moe_d4_nine_warp_kernel<Codec, 1>, ids,
+        alpha, shared_scale, act, routed_codes, routed_high, routed_scales, shared_codes,
+        shared_scales, output, static_cast<const char*>(prefetch_data),
+        static_cast<unsigned long long>(prefetch_bytes)));
+}
+
+void launch_d4_dependent(const SparseMoeWeights& weights, Tensor& destination,""",
+        """    const auto* shared_codes  = static_cast<const std::uint8_t*>(weights.shared_down.qdata);
+    const auto* shared_scales = static_cast<const std::uint8_t*>(weights.shared_down.scales);
+    auto* output              = static_cast<__nv_bfloat16*>(destination.data);
+    sparse_moe_d4_nine_warp_kernel<Codec, 1><<<kHidden, 9 * 32, 0, stream>>>(
+        ids, alpha, shared_scale, act, routed_codes, routed_high, routed_scales, shared_codes,
+        shared_scales, output, static_cast<const char*>(prefetch_data),
+        static_cast<unsigned long long>(prefetch_bytes));
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_d4_dependent(const SparseMoeWeights& weights, Tensor& destination,""",
+    )
+    replace(
+        "src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu",
+        """                shared_scales, token_activations, tokens, adaptive_route_jobs);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        CUDA_CHECK(pdl::launch_dependent(
+            {dim3(kIntermediate, tokens * kPathBlocks), dim3(PathsPerBlock * 32), 0, stream},
+            sparse_moe_d3_path_tiled_kernel<Codec, PathsPerBlock, false>, input, token_ids,
+            routed_codes, routed_high, routed_scales, shared_codes, shared_scales,
+            token_activations, tokens, nullptr));
+    }
+}""",
+        """                shared_scales, token_activations, tokens, adaptive_route_jobs);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        sparse_moe_d3_path_tiled_kernel<Codec, PathsPerBlock, false>
+            <<<dim3(kIntermediate, tokens * kPathBlocks), PathsPerBlock * 32, 0, stream>>>(
+                input, token_ids, routed_codes, routed_high, routed_scales, shared_codes,
+                shared_scales, token_activations, tokens, nullptr);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}""",
+    )
+    # src/ops/sparse_moe/small_t/sparse_moe_small_t_kernels.cu: sequential Ada fallback for sm_90+ PDL.
+    replace(
+        "src/ops/sparse_moe/small_t/sparse_moe_small_t_kernels.cu",
+        """#include "ops/sparse_moe/small_t/sparse_moe_small_t.h"
+
+#include "core/device.h"
+#include "core/pdl.cuh"
+#include "ops/common/memory.cuh"
+#include "ops/common/warp.cuh"
+#include "ops/sparse_moe/decode/sparse_moe_decode.h\"""",
+        """#include "ops/sparse_moe/small_t/sparse_moe_small_t.h"
+
+#include "core/device.h"
+#include "ops/common/memory.cuh"
+#include "ops/common/warp.cuh"
+#include "ops/sparse_moe/decode/sparse_moe_decode.h\"""",
+    )
+    replace(
+        "src/ops/sparse_moe/small_t/sparse_moe_small_t_kernels.cu",
+        """                                             float* __restrict__ partial_scores) {
+    static_assert(Tokens >= 1 && Tokens <= kSparseMoeSmallTMax);
+    __shared__ float partial[kRouterWarps][Tokens];
+    if (threadIdx.x == 0) { pdl::trigger_dependents(); }
+    const int row       = static_cast<int>(blockIdx.x) / kRouterPartitions;
+    const int partition = static_cast<int>(blockIdx.x) - row * kRouterPartitions;
+    const int warp      = static_cast<int>(threadIdx.x) >> 5;""",
+        """                                             float* __restrict__ partial_scores) {
+    static_assert(Tokens >= 1 && Tokens <= kSparseMoeSmallTMax);
+    __shared__ float partial[kRouterWarps][Tokens];
+    const int row       = static_cast<int>(blockIdx.x) / kRouterPartitions;
+    const int partition = static_cast<int>(blockIdx.x) - row * kRouterPartitions;
+    const int warp      = static_cast<int>(threadIdx.x) >> 5;""",
+    )
+    replace(
+        "src/ops/sparse_moe/small_t/sparse_moe_small_t_kernels.cu",
+        """    __shared__ float selected_logits[kTopK];
+    const int tid   = static_cast<int>(threadIdx.x);
+    const int token = static_cast<int>(blockIdx.x);
+    if (tid == 0) { pdl::trigger_dependents(); }
+    pdl::wait_for_dependencies();
+    for (int row = tid; row < kRouterRows; row += kS2Threads) {
+        float sum = 0.0f;
+#pragma unroll""",
+        """    __shared__ float selected_logits[kTopK];
+    const int tid   = static_cast<int>(threadIdx.x);
+    const int token = static_cast<int>(blockIdx.x);
+    for (int row = tid; row < kRouterRows; row += kS2Threads) {
+        float sum = 0.0f;
+#pragma unroll""",
+    )
+    replace(
+        "src/ops/sparse_moe/small_t/sparse_moe_small_t_kernels.cu",
+        """void launch_s2(const float* partial_scores, int* token_ids, float* token_alpha, float* shared_scale,
+               std::int32_t tokens, cudaStream_t stream) {
+    CUDA_CHECK(pdl::launch_dependent(
+        {dim3(static_cast<unsigned int>(tokens)), dim3(kS2Threads), 0, stream},
+        sparse_moe_small_t_s2_kernel, partial_scores, token_ids, token_alpha, shared_scale));
+}
+
+void launch_s3_tiled(const Tensor& x, const SparseMoeWeights& weights,""",
+        """void launch_s2(const float* partial_scores, int* token_ids, float* token_alpha, float* shared_scale,
+               std::int32_t tokens, cudaStream_t stream) {
+    // PDL is sm_90+. The surrounding S1 -> S2 -> S3 -> S4 launches all use this stream, so Ada's
+    // ordinary stream ordering preserves the dependencies while giving up only cross-grid overlap.
+    sparse_moe_small_t_s2_kernel<<<static_cast<unsigned int>(tokens), kS2Threads, 0, stream>>>(
+        partial_scores, token_ids, token_alpha, shared_scale);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_s3_tiled(const Tensor& x, const SparseMoeWeights& weights,""",
+    )
+
     # Replace the Blackwell-only non-RDC archive with Ada host-launch stubs.
     replace(
         "src/ops/CMakeLists.txt",
@@ -438,6 +1986,12 @@ Supported first target:
 - BF16 / INT8 / FP8-K+V4 (K8V4) KV paths
 - software E2M1 pack/decode on Ada for the V4 cache plane
 - Ada fallback for the sm_90+ T=4 PDL/griddepcontrol GDN overlap
+- sequential Ada fallbacks for the remaining PDL/griddepcontrol routes (Q4/Q5 T=1
+  and small-T GDN projections, sparse-MoE decode and small-T stages)
+- dynamic shared memory for Q8 kernels exceeding Ada's 48 KiB static limit,
+  issued through typed launch wrappers (split-K, row-split, grouped)
+- every native NVFP4 model-weight route fails closed (attention, GDN, linear,
+  linear-add, SwiGLU, dispatch, shape selection)
 - single RTX 4090, Linux, CUDA 13.x
 
 Not supported on Ada:

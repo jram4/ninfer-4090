@@ -60,8 +60,35 @@ jobs:
           ! grep -q 'launch_t4_pdl' src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_independent.cu
           ! grep -q 'nvfp4_w4a4_tma.cu' src/ops/linear/nvfp4/sources.cmake
           ! grep -q 'nvfp4_linear_swiglu_w4a4_tma.cu' src/ops/linear_swiglu/sources.cmake
-          ! grep -q 'prompt_nvfp4_non_rdc.cu' src/ops/softmax_attention/sources.cmake
-          git diff --check
+           ! grep -q 'prompt_nvfp4_non_rdc.cu' src/ops/softmax_attention/sources.cmake
+           # Ada iteration fixes: no PDL/grid-dependency execution on sm_89.
+           ! grep -q 'core/pdl.cuh' src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu
+           ! grep -q 'core/pdl.cuh' src/ops/sparse_moe/small_t/sparse_moe_small_t_kernels.cu
+           ! grep -q 'pdl::' src/ops/sparse_moe/decode/sparse_moe_decode_kernels.cu
+           ! grep -q 'pdl::' src/ops/sparse_moe/small_t/sparse_moe_small_t_kernels.cu
+           grep -q 'launch_q4_t1<Publish, false, false, false>' src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_conv_snapshot.cu
+           grep -q 'launch_q5_t1<Publish, false, false, false>' src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_conv_snapshot.cu
+           grep -q 'launch_q4_ksplit<Tokens, Q4Schedule, Publish, false, false, false>' src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_conv_snapshot.cu
+           grep -q 'launch_q5_small_t<Tokens, Publish, false, false, false>' src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_conv_snapshot.cu
+           test "$(grep -c '(void)Order;' src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_conv_snapshot.cu)" = "2"
+           # NVFP4 model-weight routes fail closed on Ada.
+           for f in src/ops/attn_input_proj/nvfp4/nvfp4_attn_input_w4a4.cu src/ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_w4a4.cu src/ops/linear/nvfp4/nvfp4_dispatch.cpp src/ops/linear/nvfp4/shapes/n14336_k5120.cu src/ops/linear/nvfp4/shapes/n16384_k5120.cu src/ops/linear/nvfp4/shapes/n34816_k5120.cu src/ops/linear/nvfp4/shapes/n5120_k17408.cu src/ops/linear/nvfp4/shapes/n5120_k6144.cu src/ops/linear_add/nvfp4/nvfp4_linear_add_w4a4.cu src/ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4.cu; do grep -q 'require Blackwell' "$f"; done
+           ! grep -q 'w4a4_tma_route(tokens)' src/ops/attn_input_proj/nvfp4/nvfp4_attn_input_w4a4.cu src/ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_w4a4.cu src/ops/linear_add/nvfp4/nvfp4_linear_add_w4a4.cu
+           # Q8 launches configure dynamic shared memory; no raw Q8 kernel launches in .cu files.
+           grep -q 'cudaFuncAttributeMaxDynamicSharedMemorySize' src/ops/linear/q8/q8_ksplit_mma.cuh
+           grep -q 'cudaFuncAttributeMaxDynamicSharedMemorySize' src/ops/linear/q8/q8_ksplit_grouped_mma.cuh
+           grep -q 'cudaFuncAttributeMaxDynamicSharedMemorySize' src/ops/linear/q8/q8_rowsplit_gemm_mma.cuh
+           grep -q 'void launch_q8_ksplit_mma' src/ops/linear/q8/q8_ksplit_mma.cuh
+           grep -q 'void launch_q8_ksplit_grouped_mma' src/ops/linear/q8/q8_ksplit_grouped_mma.cuh
+           grep -q 'void launch_q8_rowsplit_gemm_mma' src/ops/linear/q8/q8_rowsplit_gemm_mma.cuh
+           ! grep -rn 'q8_ksplit_mma_kernel<\|q8_ksplit_grouped_mma_kernel<\|q8_rowsplit_gemm_mma_kernel<' --include='*.cu' src/
+           for f in src/ops/attn_input_proj/q8/q8_attn_input_gemm_mma.cu src/ops/attn_input_proj/q8/q8_attn_input_gemm_splitk.cu src/ops/attn_input_proj/q8/q8_dflash2_attn_input.cu src/ops/dynamic_grouped_conv/q8/q8_dynamic_grouped_conv_add_materialized.cu src/ops/gdn_input_proj/q8/q8_gdn_input_gemm_mma.cu src/ops/gdn_input_proj/q8/q8_gdn_input_gemm_splitk.cu src/ops/linear/q8/q8_ksplit_launch.cuh src/ops/linear/q8/q8_rowsplit_gemm_mma.cu src/ops/linear/q8/shapes/n2048_k16384.cu src/ops/linear/q8/shapes/n5120_k25600.cu src/ops/linear_add/q8/q8_linear_add_gemm_grouped.cu src/ops/linear_add/q8/q8_linear_add_gemm_mma.cu src/ops/linear_add/q8/q8_linear_add_gemm_splitk.cu src/ops/linear_pair/q8/q8_pair_gemm_concat.cu src/ops/linear_pair/q8/q8_pair_gemm_splitk.cu src/ops/linear_swiglu/q8/q8_dflash2_linear_swiglu.cu src/ops/linear_swiglu/q8/q8_linear_swiglu_gemm_mma.cu src/ops/linear_swiglu/q8/q8_linear_swiglu_gemm_splitk.cu; do grep -q 'launch_q8_' "$f"; done
+           # Preserved contracts: MTP maximum, topology signature, K8V4 software codec.
+           grep -q 'draft_tokens > 10' src/product/speculative_options.h
+           grep -q 'kMtpDecodeMaximumDrafts    = 10' src/models/qwen3_5/program/round_buffers.h
+           grep -q 'topology_signature' src/core/decode_graph.cpp
+           grep -q 'encode_nvfp4_e2m1' src/ops/linear/nvfp4/nvfp4_codec.cuh
+           git diff --check
 
       - name: Materialize patched source branch
         working-directory: upstream
