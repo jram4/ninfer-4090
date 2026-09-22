@@ -255,6 +255,62 @@ pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint
 }'''
     replace("src/ops/common/mma.cuh", old_nvfp4, new_nvfp4)
 
+    # Programmatic Dependent Launch / griddepcontrol requires sm_90+.
+    # Cinference uses it only as a T=4 overlap optimization for the independent
+    # Q4/Q5 GDN projections. On Ada, issue the same kernels sequentially on the
+    # stream; this preserves math/ordering and only gives up that overlap.
+    replace(
+        "src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_independent.cu",
+        '#include "core/pdl.cuh"\n',
+        "",
+    )
+    old_pdl = '''void launch_t4_pdl(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                   Tensor& qk, Tensor& value, Tensor& z, cudaStream_t stream) {
+    using Q4Schedule         = Q4GdnSimtR8C4Schedule;
+    constexpr int kQ5Threads = 4 * 32;
+    const dim3 q4_grid(kQkRows / Q4Schedule::kRowsPerCta, 1u, 1u);
+    const dim3 q5_grid(kValueZRows, 1u, 1u);
+    const std::int32_t q4_out_ld = static_cast<std::int32_t>(qk.nb[1] / sizeof(__nv_bfloat16));
+    const std::int32_t q5_out_ld = static_cast<std::int32_t>(value.nb[1] / sizeof(__nv_bfloat16));
+
+    // Q5 and Q4 publish disjoint row ranges. Q4 can execute while Q5 drains and joins Q5 only at
+    // exit, before the following convolution/snapshot kernel becomes runnable.
+    q5_rowsplit_gemm_simt_split4_kernel<Q5RowSplitSimtSchedule, 4, 5, kHidden, true, kValueRows,
+                                        Q5Split4StoreEpilogue, true, false>
+        <<<q5_grid, kQ5Threads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(value_z_weight.qdata),
+            static_cast<const std::uint8_t*>(value_z_weight.qhigh),
+            static_cast<const std::uint8_t*>(value_z_weight.scales),
+            static_cast<__nv_bfloat16*>(value.data), static_cast<__nv_bfloat16*>(z.data),
+            kValueZRows, q5_out_ld, kHidden, 4, value_z_weight.padded_shape[1], 5);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(pdl::launch_dependent(
+        {q4_grid, dim3(Q4Schedule::kThreads), 0, stream},
+        q4_rowsplit_gemm_simt_kernel<Q4Schedule, true, false, 0, Q4SimtStoreEpilogue, false, true>,
+        static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(qk_weight.qdata),
+        static_cast<const std::uint8_t*>(qk_weight.scales), static_cast<__nv_bfloat16*>(qk.data),
+        nullptr, q4_out_ld, 0, kQkRows, kHidden, 4, qk_weight.padded_shape[1],
+        Q4SimtStoreEpilogue{}));
+}'''
+    new_pdl = '''void launch_t4_ada(const Tensor& x, const Weight& qk_weight,
+                   const Weight& value_z_weight, Tensor& qk, Tensor& value, Tensor& z,
+                   cudaStream_t stream) {
+    launch_q4(x, qk_weight, qk, stream);
+    launch_q5(x, value_z_weight, value, z, stream);
+}'''
+    replace(
+        "src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_independent.cu",
+        old_pdl,
+        new_pdl,
+    )
+    replace(
+        "src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_independent.cu",
+        "        launch_t4_pdl(x, qk_weight, value_z_weight, qk, value, z, stream);",
+        "        launch_t4_ada(x, qk_weight, value_z_weight, qk, value, z, stream);",
+    )
+
     # Replace the Blackwell-only non-RDC archive with Ada host-launch stubs.
     replace(
         "src/ops/CMakeLists.txt",
@@ -381,6 +437,7 @@ Supported first target:
 - MTP windows 1..10
 - BF16 / INT8 / FP8-K+V4 (K8V4) KV paths
 - software E2M1 pack/decode on Ada for the V4 cache plane
+- Ada fallback for the sm_90+ T=4 PDL/griddepcontrol GDN overlap
 - single RTX 4090, Linux, CUDA 13.x
 
 Not supported on Ada:
