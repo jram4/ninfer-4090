@@ -91,9 +91,9 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t*
     unsigned half_bits[4];
 #pragma unroll
     for (int pair = 0; pair < 4; ++pair) {
-        __nv_fp4x2_e2m1 encoded;
-        encoded.__x         = bytes[pair];
-        const __half2 value = __hmul2(static_cast<__half2>(encoded), scale2);
+        const float2 decoded = detail::decode_nvfp4_e2m1x2(bytes[pair]);
+        const __half2 value =
+            __hmul2(__floats2half2_rn(decoded.x, decoded.y), scale2);
         half_bits[pair]     = *reinterpret_cast<const unsigned*>(&value);
     }
     return make_int4(static_cast<int>(half_bits[0]), static_cast<int>(half_bits[1]),
@@ -116,9 +116,9 @@ kv_cache_nvfp4_dequant_f16x16(const std::uint8_t* codes, std::uint8_t scale_code
     unsigned half_bits[8];
 #pragma unroll
     for (int pair = 0; pair < 8; ++pair) {
-        __nv_fp4x2_e2m1 encoded;
-        encoded.__x         = bytes[pair];
-        const __half2 value = __hmul2(static_cast<__half2>(encoded), scale2);
+        const float2 decoded = detail::decode_nvfp4_e2m1x2(bytes[pair]);
+        const __half2 value =
+            __hmul2(__floats2half2_rn(decoded.x, decoded.y), scale2);
         half_bits[pair]     = *reinterpret_cast<const unsigned*>(&value);
     }
     return {
