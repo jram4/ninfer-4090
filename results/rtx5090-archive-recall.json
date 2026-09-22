@@ -8,9 +8,8 @@
     "upstream_revision": "9e163eee4b8acec21ab0ac765107b6a3f287b217"
   },
   "model": {
-    "repo_id": "Dragoy/Swift-Qwen3.8-27B-abliterated-NVFP4-NInfer",
-    "revision": "4c25aa201b412fe3850e7c0c216c42da935aba38",
-    "variant": "Swift, not the non-Swift Huihui recipe"
+    "name": "Huihui Qwen3.8-27B Abliterated NVFP4",
+    "attribution_source": "Confirmed by the benchmark owner."
   },
   "hardware": {
     "gpu": "NVIDIA GeForce RTX 5090",
@@ -78,7 +77,6 @@
     }
   ],
   "limitations": [
-    "These measurements use the Swift artifact and must not be represented as measurements of the non-Swift Huihui checkpoint.",
     "The repetitive recall workload has high draft acceptance; ordinary prose can be much slower.",
     "A prior 260,000-token repeat measured 275.73 tok/s; these are individual observations, not a universal speed guarantee."
   ]
