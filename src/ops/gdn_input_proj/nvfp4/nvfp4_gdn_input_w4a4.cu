@@ -7,6 +7,8 @@
 #include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma_launch.h"
 
+#include <stdexcept>
+
 namespace ninfer::ops::detail {
 namespace {
 
@@ -41,27 +43,9 @@ void launch_gemm(const Weight& weight, Tensor& qkv, Tensor& z, Nvfp4W4a4Workspac
 
 void nvfp4_gdn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                                  Nvfp4W4a4Workspace workspace, cudaStream_t stream) {
-    const std::int32_t tokens = x.ne[1];
-    launch_nvfp4_w4a4_quantize(
-        x, weight, workspace,
-        w4a4_tma_route(tokens) ? Nvfp4ScaleLayout::Tiled : Nvfp4ScaleLayout::RowMajor, stream);
-    if (w4a4_tma_route(tokens)) {
-        const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
-        launch_nvfp4_w4a4_tma_gdn(
-            workspace.codes, workspace.scales, static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(qkv.data),
-            static_cast<__nv_bfloat16*>(z.data), tokens, alpha, stream);
-    } else if (tokens <= 64) {
-        launch_gemm<M32N64>(weight, qkv, z, workspace, tokens, stream);
-    } else if (tokens <= 96) {
-        launch_gemm<M32N128>(weight, qkv, z, workspace, tokens, stream);
-    } else if (tokens <= 128) {
-        launch_gemm<M128N128Pipelined>(weight, qkv, z, workspace, tokens, stream);
-    } else if (tokens <= 192) {
-        launch_gemm<M64N128>(weight, qkv, z, workspace, tokens, stream);
-    } else {
-        launch_gemm<M128N128Resident>(weight, qkv, z, workspace, tokens, stream);
-    }
+    (void)x; (void)weight; (void)qkv; (void)z; (void)workspace; (void)stream;
+    throw std::invalid_argument(
+        "Cinference-4090: native NVFP4 GDN weights require Blackwell");
 }
 
 } // namespace ninfer::ops::detail

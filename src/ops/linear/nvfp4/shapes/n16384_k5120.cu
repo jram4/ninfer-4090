@@ -39,12 +39,8 @@ Nvfp4Launch select_a16(std::int32_t tokens) {
 }
 
 Nvfp4A4Route select_a4(std::int32_t tokens) {
-    if (tokens >= 1024) return nvfp4_a4_tma_route<Nvfp4GeometryId::N16384K5120>();
-    if (tokens <= 64) return nvfp4_a4_mma_route<Geometry, T32R64>();
-    if (tokens <= 96) return nvfp4_a4_mma_route<Geometry, T32R128>();
-    if (tokens <= 128) return nvfp4_a4_mma_route<Geometry, T128R128Pipelined>();
-    if (tokens <= 192) return nvfp4_a4_mma_route<Geometry, T64R128>();
-    return nvfp4_a4_mma_route<Geometry, T128R128Resident>();
+    (void)tokens;
+    throw std::invalid_argument("Cinference-4090: native NVFP4 linear weights require Blackwell");
 }
 
 bool uses_a4(std::int32_t, std::int32_t) { return true; }
