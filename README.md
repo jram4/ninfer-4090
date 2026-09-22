@@ -8,7 +8,7 @@ Built on [NInfer](https://github.com/Neroued/ninfer), with **MTP-10 speculative 
 
 ## Run
 
-For Huihui Qwen3.8-27B Abliterated NVFP4, use the [one-menu installer](https://github.com/satellitedown/fast-long-context-cinference):
+For [Huihui Qwen3.8-27B Abliterated NVFP4](https://huggingface.co/satellitedown/Huihui-Qwen3.8-27B-abliterated-NVFP4-NInfer-v3), use the [one-menu installer](https://github.com/satellitedown/fast-long-context-cinference):
 
 ```bash
 git clone https://github.com/satellitedown/fast-long-context-cinference.git
