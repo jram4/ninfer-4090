@@ -4,10 +4,11 @@ ninfer_internal_includes(ninfer_ops)
 ninfer_cuda_archive(ninfer_ops)
 target_link_libraries(ninfer_ops PUBLIC ninfer_core PRIVATE ninfer_nvfp4_non_rdc)
 
-# Warp-specialized SM120 NVFP4 kernels use setmaxnreg to transfer registers from
-# producer to consumer warpgroups. RDC makes ptxas discard that contract. These
-# self-contained kernels therefore use a non-RDC archive and host launchers.
-add_library(ninfer_nvfp4_non_rdc STATIC)
+# RTX 4090 / Ada has no native NVFP4 W4A4/TMA route. Keep the private
+# launch ABI present with fail-closed stubs so groupwise Qwen3.8 + K8V4 can use
+# the same modern Cinference engine without compiling Blackwell-only PTX.
+add_library(ninfer_nvfp4_non_rdc STATIC
+  "${CMAKE_CURRENT_LIST_DIR}/sm89_blackwell_stubs.cu")
 ninfer_internal_includes(ninfer_nvfp4_non_rdc)
 ninfer_cuda_non_rdc_archive(ninfer_nvfp4_non_rdc)
 target_link_libraries(ninfer_nvfp4_non_rdc PRIVATE ninfer_core CUDA::cudart CUDA::cuda_driver)

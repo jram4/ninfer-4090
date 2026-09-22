@@ -2,7 +2,6 @@
 #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_kernels.h"
 
 #include "core/device.h"
-#include "core/pdl.cuh"
 #include "ops/common/math.h"
 #include "ops/linear/q4/q4_ksplit_mma.cuh"
 #include "ops/linear/q4/q4_ksplit_strided_store.cuh"
@@ -278,35 +277,11 @@ void launch_q5(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
     throw std::invalid_argument("Q4/Q5 GDN independent launch requires T in [1,15]");
 }
 
-void launch_t4_pdl(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
-                   Tensor& qk, Tensor& value, Tensor& z, cudaStream_t stream) {
-    using Q4Schedule         = Q4GdnSimtR8C4Schedule;
-    constexpr int kQ5Threads = 4 * 32;
-    const dim3 q4_grid(kQkRows / Q4Schedule::kRowsPerCta, 1u, 1u);
-    const dim3 q5_grid(kValueZRows, 1u, 1u);
-    const std::int32_t q4_out_ld = static_cast<std::int32_t>(qk.nb[1] / sizeof(__nv_bfloat16));
-    const std::int32_t q5_out_ld = static_cast<std::int32_t>(value.nb[1] / sizeof(__nv_bfloat16));
-
-    // Q5 and Q4 publish disjoint row ranges. Q4 can execute while Q5 drains and joins Q5 only at
-    // exit, before the following convolution/snapshot kernel becomes runnable.
-    q5_rowsplit_gemm_simt_split4_kernel<Q5RowSplitSimtSchedule, 4, 5, kHidden, true, kValueRows,
-                                        Q5Split4StoreEpilogue, true, false>
-        <<<q5_grid, kQ5Threads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const std::uint8_t*>(value_z_weight.qdata),
-            static_cast<const std::uint8_t*>(value_z_weight.qhigh),
-            static_cast<const std::uint8_t*>(value_z_weight.scales),
-            static_cast<__nv_bfloat16*>(value.data), static_cast<__nv_bfloat16*>(z.data),
-            kValueZRows, q5_out_ld, kHidden, 4, value_z_weight.padded_shape[1], 5);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(pdl::launch_dependent(
-        {q4_grid, dim3(Q4Schedule::kThreads), 0, stream},
-        q4_rowsplit_gemm_simt_kernel<Q4Schedule, true, false, 0, Q4SimtStoreEpilogue, false, true>,
-        static_cast<const __nv_bfloat16*>(x.data),
-        static_cast<const std::uint8_t*>(qk_weight.qdata),
-        static_cast<const std::uint8_t*>(qk_weight.scales), static_cast<__nv_bfloat16*>(qk.data),
-        nullptr, q4_out_ld, 0, kQkRows, kHidden, 4, qk_weight.padded_shape[1],
-        Q4SimtStoreEpilogue{}));
+void launch_t4_ada(const Tensor& x, const Weight& qk_weight,
+                   const Weight& value_z_weight, Tensor& qk, Tensor& value, Tensor& z,
+                   cudaStream_t stream) {
+    launch_q4(x, qk_weight, qk, stream);
+    launch_q5(x, value_z_weight, value, z, stream);
 }
 
 } // namespace
@@ -315,7 +290,7 @@ void q4_q5_gdn_input_independent_launch(const Tensor& x, const Weight& qk_weight
                                         const Weight& value_z_weight, Tensor& qk, Tensor& value,
                                         Tensor& z, cudaStream_t stream) {
     if (x.ne[1] == 4) {
-        launch_t4_pdl(x, qk_weight, value_z_weight, qk, value, z, stream);
+        launch_t4_ada(x, qk_weight, value_z_weight, qk, value, z, stream);
         return;
     }
     launch_q4(x, qk_weight, qk, stream);

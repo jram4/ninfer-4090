@@ -17,6 +17,8 @@
 #include <cuda_fp16.h>
 
 #include <cstdint>
+#include <stdexcept>
+#include <utility>
 
 namespace ninfer::ops::detail {
 
@@ -26,6 +28,20 @@ union alignas(16) Q8Bf16x8Bits {
 };
 
 static_assert(sizeof(Q8Bf16x8Bits) == 16);
+
+template <class Cfg>
+struct Q8RowSplitOperandStorage {
+    alignas(16) __nv_bfloat16 weights[Cfg::BM * Cfg::BK];
+    alignas(16) __nv_bfloat16 activations[Cfg::ACTIVATION_STAGES][Cfg::BN * Cfg::BK];
+    alignas(16) std::uint8_t codes[Cfg::BM * Cfg::BK];
+    alignas(16) std::uint8_t scales[Cfg::BM * Cfg::SCALE_CACHE_BYTES];
+};
+
+template <class Cfg, Q8Epilogue Epilogue>
+union alignas(16) Q8RowSplitSharedStorage {
+    Q8RowSplitOperandStorage<Cfg> operands;
+    float projected[Epilogue == Q8Epilogue::Residual ? Cfg::BM * Cfg::BN : 1];
+};
 
 // The predicated loads below inherited Cache::ca from cp_async_zfill's default, while the full path
 // a few lines down spells cg. This parameter makes that a choice. It defaults to ca, so adding it
@@ -103,20 +119,10 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
     static_assert(!kSwiGlu || Cfg::WARPS_M == 1 || Cfg::WARPS_M == 2,
                   "SwiGLU supports warp-local or shared-memory row pairing");
 
-    struct OperandStorage {
-        alignas(16) __nv_bfloat16 weights[BM * BK];
-        alignas(16) __nv_bfloat16 activations[Cfg::ACTIVATION_STAGES][BN * BK];
-        alignas(16) std::uint8_t codes[BM * BK];
-        alignas(16) std::uint8_t scales[BM * Cfg::SCALE_CACHE_BYTES];
-    };
-
-    union SharedStorage {
-        OperandStorage operands;
-        float projected[Epilogue == Q8Epilogue::Residual ? BM * BN : 1];
-    };
-
+    using SharedStorage = Q8RowSplitSharedStorage<Cfg, Epilogue>;
     static_assert(sizeof(SharedStorage) <= 99 * 1024);
-    __shared__ __align__(16) SharedStorage shared;
+    extern __shared__ __align__(16) unsigned char shared_raw[];
+    auto& shared = *reinterpret_cast<SharedStorage*>(shared_raw);
     auto& As = shared.operands.weights;
     auto& Bs = shared.operands.activations;
     auto& Cr = shared.operands.codes;
@@ -521,6 +527,21 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
             }
         }
     }
+}
+
+template <class Cfg, bool Full, Q8Epilogue Epilogue = Q8Epilogue::Store,
+          class Output = Q8ContiguousOutput, class... Args>
+void launch_q8_rowsplit_gemm_mma(dim3 grid, cudaStream_t stream, Args&&... args) {
+    constexpr int kDynamicBytes =
+        static_cast<int>(sizeof(Q8RowSplitSharedStorage<Cfg, Epilogue>));
+    if constexpr (kDynamicBytes > 48 * 1024) {
+        static const cudaError_t attribute = cudaFuncSetAttribute(
+            q8_rowsplit_gemm_mma_kernel<Cfg, Full, Epilogue, Output>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicBytes);
+        if (attribute != cudaSuccess) { throw std::runtime_error(cudaGetErrorString(attribute)); }
+    }
+    q8_rowsplit_gemm_mma_kernel<Cfg, Full, Epilogue, Output>
+        <<<grid, Cfg::THREADS, kDynamicBytes, stream>>>(std::forward<Args>(args)...);
 }
 
 } // namespace ninfer::ops::detail

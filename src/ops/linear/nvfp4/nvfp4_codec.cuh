@@ -4,17 +4,48 @@
 #include "ops/common/memory.cuh"
 
 #include <cuda_bf16.h>
-#include <cuda_fp4.h>
 #include <cuda_fp8.h>
 
 #include <cstdint>
 
 namespace ninfer::ops::detail {
 
+__device__ __forceinline__ float decode_nvfp4_e2m1(std::uint8_t code) {
+    const unsigned magnitude = code & 0x7U;
+    float value = 0.0F;
+    switch (magnitude) {
+    case 0: value = 0.0F; break;
+    case 1: value = 0.5F; break;
+    case 2: value = 1.0F; break;
+    case 3: value = 1.5F; break;
+    case 4: value = 2.0F; break;
+    case 5: value = 3.0F; break;
+    case 6: value = 4.0F; break;
+    default: value = 6.0F; break;
+    }
+    return (code & 0x8U) != 0U ? -value : value;
+}
+
 __device__ __forceinline__ float2 decode_nvfp4_e2m1x2(std::uint8_t storage) {
-    __nv_fp4x2_e2m1 value;
-    value.__x = storage;
-    return static_cast<float2>(value);
+    return make_float2(decode_nvfp4_e2m1(storage & 0x0FU),
+                       decode_nvfp4_e2m1((storage >> 4) & 0x0FU));
+}
+
+__device__ __forceinline__ std::uint8_t encode_nvfp4_e2m1(float value) {
+    if (isnan(value)) return 0x7U; // CUDA FP4 conversion maps NaN to +MAXNORM.
+    const bool negative = signbit(value) && value != 0.0F;
+    const float x = fabsf(value);
+    unsigned magnitude;
+    // Midpoint ties select the even E2M1 code, matching cudaRoundNearest.
+    if (x <= 0.25F) magnitude = 0;
+    else if (x < 0.75F) magnitude = 1;
+    else if (x <= 1.25F) magnitude = 2;
+    else if (x < 1.75F) magnitude = 3;
+    else if (x <= 2.5F) magnitude = 4;
+    else if (x < 3.5F) magnitude = 5;
+    else if (x <= 5.0F) magnitude = 6;
+    else magnitude = 7;
+    return static_cast<std::uint8_t>(magnitude | (negative ? 0x8U : 0U));
 }
 
 __device__ __forceinline__ float decode_nvfp4_e4m3(std::uint8_t storage) {
@@ -33,31 +64,21 @@ static_assert(alignof(Nvfp4QuantizedK16) == 8);
 
 __device__ __forceinline__ void
 pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint32_t& codes_hi) {
-    asm volatile("{\n"
-                 ".reg .b8 b0;\n"
-                 ".reg .b8 b1;\n"
-                 ".reg .b8 b2;\n"
-                 ".reg .b8 b3;\n"
-                 ".reg .b8 b4;\n"
-                 ".reg .b8 b5;\n"
-                 ".reg .b8 b6;\n"
-                 ".reg .b8 b7;\n"
-                 "cvt.rn.satfinite.e2m1x2.f32 b0, %3, %2;\n"
-                 "cvt.rn.satfinite.e2m1x2.f32 b1, %5, %4;\n"
-                 "cvt.rn.satfinite.e2m1x2.f32 b2, %7, %6;\n"
-                 "cvt.rn.satfinite.e2m1x2.f32 b3, %9, %8;\n"
-                 "cvt.rn.satfinite.e2m1x2.f32 b4, %11, %10;\n"
-                 "cvt.rn.satfinite.e2m1x2.f32 b5, %13, %12;\n"
-                 "cvt.rn.satfinite.e2m1x2.f32 b6, %15, %14;\n"
-                 "cvt.rn.satfinite.e2m1x2.f32 b7, %17, %16;\n"
-                 "mov.b32 %0, {b0,b1,b2,b3};\n"
-                 "mov.b32 %1, {b4,b5,b6,b7};\n"
-                 "}\n"
-                 : "=r"(codes_lo), "=r"(codes_hi)
-                 : "f"(values[0].x), "f"(values[0].y), "f"(values[1].x), "f"(values[1].y),
-                   "f"(values[2].x), "f"(values[2].y), "f"(values[3].x), "f"(values[3].y),
-                   "f"(values[4].x), "f"(values[4].y), "f"(values[5].x), "f"(values[5].y),
-                   "f"(values[6].x), "f"(values[6].y), "f"(values[7].x), "f"(values[7].y));
+    std::uint8_t bytes[8];
+#pragma unroll
+    for (int pair = 0; pair < 8; ++pair) {
+        const std::uint8_t lo = encode_nvfp4_e2m1(values[pair].x);
+        const std::uint8_t hi = encode_nvfp4_e2m1(values[pair].y);
+        bytes[pair] = static_cast<std::uint8_t>(lo | (hi << 4));
+    }
+    codes_lo = static_cast<std::uint32_t>(bytes[0]) |
+               (static_cast<std::uint32_t>(bytes[1]) << 8) |
+               (static_cast<std::uint32_t>(bytes[2]) << 16) |
+               (static_cast<std::uint32_t>(bytes[3]) << 24);
+    codes_hi = static_cast<std::uint32_t>(bytes[4]) |
+               (static_cast<std::uint32_t>(bytes[5]) << 8) |
+               (static_cast<std::uint32_t>(bytes[6]) << 16) |
+               (static_cast<std::uint32_t>(bytes[7]) << 24);
 }
 
 __device__ __forceinline__ Nvfp4QuantizedK16 quantize_nvfp4_k16(const __nv_bfloat16* source,

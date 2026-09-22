@@ -75,10 +75,10 @@ void launch_active_cols(const Tensor& x, const Weight& first_weight, const Weigh
     const Q8ContiguousOutput ignored{static_cast<__nv_bfloat16*>(first_out.data), kRows};
     const Q8PairExactTEpilogue epilogue{static_cast<__nv_bfloat16*>(first_out.data),
                                         static_cast<__nv_bfloat16*>(second_out.data)};
-    q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule, Q8ContiguousOutput, Q8PairExactTEpilogue,
-                         Q8PairExactTRows><<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), first_codes, first_scales, ignored, epilogue,
-        Q8PairExactTRows{});
+    launch_q8_ksplit_mma<Geometry, ActiveCols, Schedule, Q8ContiguousOutput, Q8PairExactTEpilogue,
+                         Q8PairExactTRows>(
+        dim3(kRows / kRowsPerCta), stream, static_cast<const __nv_bfloat16*>(x.data), first_codes,
+        first_scales, ignored, epilogue, Q8PairExactTRows{});
 }
 
 template <std::size_t... Offsets>
@@ -102,9 +102,9 @@ void launch_medium(const Tensor& x, const Weight& first_weight, const Weight& se
     }
     const PairOutput output{static_cast<__nv_bfloat16*>(first_out.data),
                             static_cast<__nv_bfloat16*>(second_out.data)};
-    q8_ksplit_grouped_mma_kernel<kHidden, TileCols, KSplits, NGroups, MinBlocks>
-        <<<(2 * kRows) / 16, KSplits * NGroups * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data), first_codes, first_scales, output, x.ne[1]);
+    launch_q8_ksplit_grouped_mma<kHidden, TileCols, KSplits, NGroups, MinBlocks, PairOutput>(
+        dim3((2 * kRows) / 16), stream, static_cast<const __nv_bfloat16*>(x.data), first_codes,
+        first_scales, output, x.ne[1]);
 }
 
 } // namespace

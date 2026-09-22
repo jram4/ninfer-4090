@@ -258,17 +258,12 @@ void launch_t1(const Tensor& x, const Weight& qk_weight, const Weight& value_z_w
                const GdnConvEpilogue<Publish>& qk_epilogue,
                const GdnConvEpilogue<Publish>& value_epilogue, Tensor& query, Tensor& value,
                Tensor& z, cudaStream_t stream) {
-    // The Q4 and Q5 sides read the same activation but write disjoint output/state rows. The
-    // dependent side therefore computes before waiting, then joins the producer at kernel exit.
-    if constexpr (Order == PdlOrder::Q5ThenQ4) {
-        launch_q5_t1<Publish, true, false, false>(x, value_z_weight, value_epilogue, value, z,
-                                                  stream);
-        launch_q4_t1<Publish, false, true, true>(x, qk_weight, qk_epilogue, query, stream);
-    } else {
-        launch_q4_t1<Publish, true, false, false>(x, qk_weight, qk_epilogue, query, stream);
-        launch_q5_t1<Publish, false, true, true>(x, value_z_weight, value_epilogue, value, z,
-                                                 stream);
-    }
+    // Programmatic Dependent Launch requires sm_90+. Ada preserves the same mathematics and
+    // publication ordering by running the disjoint Q4 and Q5 projections sequentially on the
+    // same stream. Order remains a template parameter so the public routing contract is unchanged.
+    (void)Order;
+    launch_q4_t1<Publish, false, false, false>(x, qk_weight, qk_epilogue, query, stream);
+    launch_q5_t1<Publish, false, false, false>(x, value_z_weight, value_epilogue, value, z, stream);
 }
 
 template <int Tokens, class Q4Schedule, PdlOrder Order, class Publish>
@@ -276,17 +271,11 @@ void launch_small_t_schedule(const Tensor& x, const Weight& qk_weight, const Wei
                              const GdnConvEpilogue<Publish>& qk_epilogue,
                              const GdnConvEpilogue<Publish>& value_epilogue, Tensor& query,
                              Tensor& value, Tensor& z, cudaStream_t stream) {
-    if constexpr (Order == PdlOrder::Q5ThenQ4) {
-        launch_q5_small_t<Tokens, Publish, true, false, false>(x, value_z_weight, value_epilogue,
-                                                               value, z, stream);
-        launch_q4_ksplit<Tokens, Q4Schedule, Publish, false, true, true>(x, qk_weight, qk_epilogue,
-                                                                         query, stream);
-    } else {
-        launch_q4_ksplit<Tokens, Q4Schedule, Publish, true, false, false>(x, qk_weight, qk_epilogue,
-                                                                          query, stream);
-        launch_q5_small_t<Tokens, Publish, false, true, true>(x, value_z_weight, value_epilogue,
-                                                              value, z, stream);
-    }
+    (void)Order;
+    launch_q4_ksplit<Tokens, Q4Schedule, Publish, false, false, false>(
+        x, qk_weight, qk_epilogue, query, stream);
+    launch_q5_small_t<Tokens, Publish, false, false, false>(
+        x, value_z_weight, value_epilogue, value, z, stream);
 }
 
 template <int Tokens, PdlOrder Order, class Publish>

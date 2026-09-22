@@ -17,7 +17,9 @@
 #include <cuda_fp16.h>
 
 #include <cstdint>
+#include <stdexcept>
 #include <type_traits>
+#include <utility>
 
 namespace ninfer::ops::detail {
 
@@ -69,6 +71,12 @@ union alignas(16) Q8KSplitSharedStorage {
     float partial[Schedule::kKWarps * (Schedule::kTileTokens / 8) * 32 * 4];
 };
 
+template <class Schedule>
+inline constexpr int kQ8KSplitDynamicSharedBytes =
+    sizeof(Q8KSplitSharedStorage<Schedule>) > 48 * 1024
+        ? static_cast<int>(sizeof(Q8KSplitSharedStorage<Schedule>))
+        : 0;
+
 struct Q8KSplitIdentityColumns {
     __device__ __forceinline__ int operator()(int column) const { return column; }
 };
@@ -104,7 +112,7 @@ q8_ksplit_mma(const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restric
 
     using SharedStorage = Q8KSplitSharedStorage<Schedule>;
 
-    constexpr bool kDynamicShared = TiledColumns && ActiveCols > 64;
+    constexpr bool kDynamicShared = kQ8KSplitDynamicSharedBytes<Schedule> != 0;
     __shared__ __align__(
         16) unsigned char static_shared[kDynamicShared ? 1 : sizeof(SharedStorage)];
     extern __shared__ __align__(16) unsigned char dynamic_shared[];
@@ -389,6 +397,23 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q8_ksplit_
     Epilogue epilogue = {}, RowPolicy row_policy = {}, std::int32_t columns = ActiveCols) {
     q8_ksplit_mma<Geometry, ActiveCols, Schedule, Output, Epilogue, RowPolicy, DirectPairEpilogue,
                   TiledColumns>(x, codes, scales, output, epilogue, row_policy, columns);
+}
+
+template <class Geometry, int ActiveCols, class Schedule, class Output,
+          class Epilogue = Q8KSplitStoreEpilogue, class RowPolicy = Q8KSplitIdentityRows,
+          bool DirectPairEpilogue = false, bool TiledColumns = false, class... Args>
+void launch_q8_ksplit_mma(dim3 grid, cudaStream_t stream, Args&&... args) {
+    constexpr int kDynamicBytes = kQ8KSplitDynamicSharedBytes<Schedule>;
+    if constexpr (kDynamicBytes != 0) {
+        static const cudaError_t attribute = cudaFuncSetAttribute(
+            q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule, Output, Epilogue, RowPolicy,
+                                 DirectPairEpilogue, TiledColumns>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicBytes);
+        if (attribute != cudaSuccess) { throw std::runtime_error(cudaGetErrorString(attribute)); }
+    }
+    q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule, Output, Epilogue, RowPolicy,
+                         DirectPairEpilogue, TiledColumns>
+        <<<grid, Schedule::kThreads, kDynamicBytes, stream>>>(std::forward<Args>(args)...);
 }
 
 } // namespace ninfer::ops::detail

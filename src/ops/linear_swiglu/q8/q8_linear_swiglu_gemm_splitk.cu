@@ -38,11 +38,11 @@ void launch_active_cols(const Tensor& x, const Weight& w, Tensor& out, cudaStrea
     const Q8ContiguousOutput ignored_output{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
     const Q8SwiGluDirectEpilogue epilogue{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
     const RowPolicy row_policy{};
-    q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule, Q8ContiguousOutput, Q8SwiGluDirectEpilogue,
-                         RowPolicy, true>
-        <<<kIntermediate / RowPolicy::kOutputRowsPerCta, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
-            static_cast<const std::uint8_t*>(w.scales), ignored_output, epilogue, row_policy);
+    launch_q8_ksplit_mma<Geometry, ActiveCols, Schedule, Q8ContiguousOutput,
+                         Q8SwiGluDirectEpilogue, RowPolicy, true>(
+        dim3(kIntermediate / RowPolicy::kOutputRowsPerCta), stream,
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+        static_cast<const std::uint8_t*>(w.scales), ignored_output, epilogue, row_policy);
 }
 
 template <std::size_t... Offsets>
