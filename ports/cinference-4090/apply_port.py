@@ -122,7 +122,7 @@ __device__ __forceinline__ float2 decode_nvfp4_e2m1x2(std::uint8_t storage) {
 }
 
 __device__ __forceinline__ std::uint8_t encode_nvfp4_e2m1(float value) {
-    if (isnan(value)) return 0;
+    if (isnan(value)) return 0x7U; // CUDA FP4 conversion maps NaN to +MAXNORM.
     const bool negative = signbit(value) && value != 0.0F;
     const float x = fabsf(value);
     unsigned magnitude;
@@ -337,6 +337,13 @@ void launch_nvfp4_w4a4_tma_linear_add(Nvfp4GeometryId, const std::uint8_t*,
                                       const std::uint8_t*, const std::uint8_t*,
                                       const std::uint8_t*, __nv_bfloat16*, std::int32_t,
                                       float, cudaStream_t) {
+    unsupported();
+}
+
+void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t*, const std::uint8_t*,
+                                         const std::uint8_t*, const std::uint8_t*,
+                                         __nv_bfloat16*, std::int32_t, float,
+                                         cudaStream_t) {
     unsupported();
 }
 
