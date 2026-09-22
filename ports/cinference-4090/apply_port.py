@@ -57,6 +57,8 @@ def main() -> None:
     cmake = read("CMakeLists.txt")
     cmake = cmake.replace("sm_120a", "sm_89")
     cmake = cmake.replace("CMAKE_CUDA_ARCHITECTURES 120a", "CMAKE_CUDA_ARCHITECTURES 89")
+    cmake = cmake.replace('CMAKE_CUDA_ARCHITECTURES STREQUAL "120a"',
+                          'CMAKE_CUDA_ARCHITECTURES STREQUAL "89"')
     cmake = cmake.replace('CMAKE_CUDA_ARCHITECTURES=120a', 'CMAKE_CUDA_ARCHITECTURES=89')
     write("CMakeLists.txt", cmake)
 
