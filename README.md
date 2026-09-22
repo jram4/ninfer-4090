@@ -2,16 +2,16 @@
 
 # Cinference
 
-**Fast local Qwen inference on a single RTX 5090 (32 GB), with 256K context.**
+**A custom C++/CUDA inference engine for Qwen on a single RTX 5090 (32 GB), with 256K context.**
 
-Built on [NInfer](https://github.com/Neroued/ninfer).
+Built from [NInfer](https://github.com/Neroued/ninfer), with source-level changes to speculative decoding, CPU/GPU round buffers, and CUDA Graph management. Cinference modifies the native engine itself, not just its launch flags.
 
 ## What changed
 
-- **MTP-10:** increased the speculative draft window from 5 to 10 tokens.
-- **CUDA Graph matching:** identifies MTP graph layouts from captured GPU operations, keeping batch sizes separate.
-- **Larger MTP buffers:** updated buffers and validation for the longer draft rounds.
-- **Ready-to-run setup:** published the Huihui NVFP4 v3 model and a one-menu installer.
+- **MTP-10 decoding:** raised the draft window from 5 to 10 tokens. Longer proposals let the engine emit more tokens per verification round when the drafts are accepted.
+- **Capture-based CUDA Graph reuse:** reworked MTP graph matching to use the captured node types and kernel functions. Profiles with matching signatures and batch sizes share an executable, rather than relying only on planned context ranges.
+- **Expanded CPU/GPU round handling:** enlarged draft and token-position buffers and updated native validation for the longer windows. This carries MTP-10 through the decoding path, not just the command-line options.
+- **Ready-to-run Huihui setup:** published the NVFP4 v3 model and a matching installer. Users download one ~21.5 GB model file, without a local conversion step.
 
 ## Run
 
