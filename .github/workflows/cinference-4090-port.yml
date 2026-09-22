@@ -51,6 +51,9 @@ jobs:
           grep -q 'sm89_blackwell_stubs.cu' src/ops/CMakeLists.txt
           test -f src/ops/sm89_blackwell_stubs.cu
           grep -q 'launch_nvfp4_linear_swiglu_w4a4_tma' src/ops/sm89_blackwell_stubs.cu
+          grep -q 'launch_t4_ada' src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_independent.cu
+          ! grep -q 'core/pdl.cuh' src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_independent.cu
+          ! grep -q 'launch_t4_pdl' src/ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_independent.cu
           ! grep -q 'nvfp4_w4a4_tma.cu' src/ops/linear/nvfp4/sources.cmake
           ! grep -q 'nvfp4_linear_swiglu_w4a4_tma.cu' src/ops/linear_swiglu/sources.cmake
           ! grep -q 'prompt_nvfp4_non_rdc.cu' src/ops/softmax_attention/sources.cmake
