@@ -282,11 +282,10 @@ void launch_active_cols(const Tensor& x, const Weight& weight, Tensor& qkv, Tens
     using Schedule = Q8KSplitDefaultSchedule<TileCols, ActiveCols>;
     static_assert((8192 % kRowsPerCta) == 0 && (4096 % kRowsPerCta) == 0);
     const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
-    q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule>
-        <<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), output);
+    launch_q8_ksplit_mma<Geometry, ActiveCols, Schedule, Output>(
+        dim3(kRows / kRowsPerCta), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output);
 }
 
 template <int ActiveCols, class Publish>
@@ -321,11 +320,11 @@ void launch_active_cols_conv(const Tensor& x, const Weight& weight, const Tensor
         },
         static_cast<__nv_bfloat16*>(z.data),
     };
-    q8_ksplit_mma_kernel<Geometry, ActiveCols, Schedule, Output, Q8GdnSplitKConvEpilogue<Publish>>
-        <<<kRows / kRowsPerCta, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), ignored_output, epilogue);
+    launch_q8_ksplit_mma<Geometry, ActiveCols, Schedule, Output,
+                         Q8GdnSplitKConvEpilogue<Publish>>(
+        dim3(kRows / kRowsPerCta), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), ignored_output, epilogue);
 }
 
 template <int ActiveCols>

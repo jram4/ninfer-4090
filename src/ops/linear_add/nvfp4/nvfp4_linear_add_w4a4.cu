@@ -60,33 +60,9 @@ void launch_problem(const Weight& weight, Tensor& residual, Nvfp4W4a4Workspace w
 
 void nvfp4_linear_add_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& residual,
                                   Nvfp4W4a4Workspace workspace, cudaStream_t stream) {
-    const std::int32_t tokens = x.ne[1];
-    launch_nvfp4_w4a4_quantize(
-        x, weight, workspace,
-        w4a4_tma_route(tokens) ? Nvfp4ScaleLayout::Tiled : Nvfp4ScaleLayout::RowMajor, stream);
-    const Nvfp4GeometryId problem = resolve_nvfp4_geometry(weight.n, weight.k);
-    if (w4a4_tma_route(tokens)) {
-        const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
-        launch_nvfp4_w4a4_tma_linear_add(problem, workspace.codes, workspace.scales,
-                                         static_cast<const std::uint8_t*>(weight.qdata),
-                                         static_cast<const std::uint8_t*>(weight.scales),
-                                         static_cast<__nv_bfloat16*>(residual.data), tokens, alpha,
-                                         stream);
-        return;
-    }
-    switch (problem) {
-    case Nvfp4GeometryId::N5120K6144:
-        launch_problem<Nvfp4N5120K6144>(weight, residual, workspace, tokens, stream);
-        return;
-    case Nvfp4GeometryId::N5120K17408:
-        launch_problem<Nvfp4N5120K17408>(weight, residual, workspace, tokens, stream);
-        return;
-    case Nvfp4GeometryId::N14336K5120:
-    case Nvfp4GeometryId::N16384K5120:
-    case Nvfp4GeometryId::N34816K5120:
-        break;
-    }
-    throw std::invalid_argument("nvfp4 linear_add: unsupported problem");
+    (void)x; (void)weight; (void)residual; (void)workspace; (void)stream;
+    throw std::invalid_argument(
+        "Cinference-4090: native NVFP4 linear-add weights require Blackwell");
 }
 
 } // namespace ninfer::ops::detail

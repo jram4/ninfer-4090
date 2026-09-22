@@ -43,13 +43,12 @@ void launch_small(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k, T
     const Output output{static_cast<__nv_bfloat16*>(q.data), static_cast<__nv_bfloat16*>(k.data),
                         static_cast<__nv_bfloat16*>(v.data)};
     constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
-    q8_ksplit_mma_kernel<Geometry, Columns, Schedule, Output, Q8KSplitStoreEpilogue,
-                         Q8KSplitIdentityRows, false, !Exact>
-        <<<kBlocks, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), output, Q8KSplitStoreEpilogue{},
-            Q8KSplitIdentityRows{}, x.ne[1]);
+    launch_q8_ksplit_mma<Geometry, Columns, Schedule, Output, Q8KSplitStoreEpilogue,
+                         Q8KSplitIdentityRows, false, !Exact>(
+        dim3(kBlocks), stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, Q8KSplitStoreEpilogue{},
+        Q8KSplitIdentityRows{}, x.ne[1]);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -72,12 +71,11 @@ void launch_mma_slice(const Tensor& x, const Weight& weight, Tensor& q, Tensor& 
                         static_cast<__nv_bfloat16*>(v.data)};
     const dim3 grid(Geometry::kOutputRows / Schedule::BM,
                     static_cast<unsigned>(div_up(x.ne[1], Schedule::BN)), 1u);
-    q8_rowsplit_gemm_mma_kernel<Schedule, Full, Q8Epilogue::Store, Output>
-        <<<grid, Schedule::THREADS, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), output, Geometry::kOutputRows,
-            Geometry::kInputRows, x.ne[1], Geometry::kInputRows);
+    launch_q8_rowsplit_gemm_mma<Schedule, Full, Q8Epilogue::Store, Output>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), output, Geometry::kOutputRows,
+        Geometry::kInputRows, x.ne[1], Geometry::kInputRows);
     CUDA_CHECK(cudaGetLastError());
 }
 

@@ -31,15 +31,8 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t n, std::int32_t k
 
 void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
                     WorkspaceArena* workspace, cudaStream_t stream) {
-    validate_nvfp4_weight(weight, "nvfp4 linear");
-    if (x.ne[1] <= 0) throw std::invalid_argument("nvfp4 linear: T must be positive");
-    const auto& shape = resolve_shape(weight.n, weight.k, policy);
-    if (!allows_a4(policy) || !shape.uses_a4(x.ne[1], x.ne[1]))
-        return shape.a16(x, weight, out, stream);
-    if (workspace == nullptr)
-        throw std::invalid_argument("nvfp4 A4 linear requires caller workspace");
-    auto scope         = workspace->scope();
-    const auto scratch = allocate_nvfp4_w4a4_workspace(*workspace, x.ne[1], weight.k);
-    shape.a4(x, weight, out, scratch, stream);
+    (void)x; (void)weight; (void)out; (void)policy; (void)workspace; (void)stream;
+    throw std::invalid_argument(
+        "Cinference-4090: native NVFP4 model weights require Blackwell; use a groupwise artifact");
 }
 } // namespace ninfer::ops::detail

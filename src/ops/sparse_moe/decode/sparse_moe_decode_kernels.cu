@@ -2,7 +2,6 @@
 #include "ops/sparse_moe/decode/sparse_moe_decode.h"
 
 #include "core/device.h"
-#include "core/pdl.cuh"
 #include "ops/common/math.cuh"
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
@@ -100,7 +99,6 @@ __global__ void sparse_moe_d2_warp_kernel(const float* __restrict__ scores, int*
                                           float* __restrict__ alpha,
                                           float* __restrict__ shared_scale) {
     __shared__ float selected_logits[kTopK];
-    if (threadIdx.x == 0) { pdl::trigger_dependents(); }
     sparse_moe_select_top8_warp(scores, ids, alpha, shared_scale, selected_logits);
 }
 
@@ -247,7 +245,6 @@ __global__ void sparse_moe_d3_nine_warp_kernel(
     const int tid  = static_cast<int>(threadIdx.x);
     const int warp = tid >> 5;
     const int lane = tid & 31;
-    if (tid == 0) { pdl::trigger_dependents(); }
     if (tid < 256) { store_vec(x_shared + tid * 8, load_vec<uint4>(x + tid * 8)); }
     __syncthreads();
 
@@ -255,7 +252,6 @@ __global__ void sparse_moe_d3_nine_warp_kernel(
     float gate  = 0.0f;
     float up    = 0.0f;
     if (warp < kTopK) {
-        pdl::wait_for_dependencies();
         const int expert   = ids[warp];
         const int row_base = expert * 1024;
         dot_two_rows<RoutedCodec, kHidden>(routed_codes, routed_high, routed_scales, row_base + j,
@@ -303,15 +299,6 @@ __global__ void sparse_moe_d3_path_tiled_kernel(
         }
         __syncthreads();
 
-        constexpr int kRouterPartitions = 4;
-        const int activation_begin      = (token * (kTopK + 1) + path) * kIntermediate;
-        // Routed paths need S2's ids. A shared path is independent only when its output lies
-        // beyond the partial-score prefix that S2 may still read from the lifetime-unioned scratch.
-        const bool must_wait_for_s2 =
-            path < kTopK || activation_begin < tokens * kRouterRows * kRouterPartitions;
-        if constexpr (!Adaptive) {
-            if (must_wait_for_s2) { pdl::wait_for_dependencies(); }
-        }
         float gate = 0.0f;
         float up   = 0.0f;
         if (path < kTopK) {
@@ -393,7 +380,6 @@ __global__ void sparse_moe_d4_nine_warp_kernel(
     const std::uint8_t* __restrict__ shared_scales, __nv_bfloat16* __restrict__ destination,
     const char* __restrict__ prefetch_data, unsigned long long prefetch_bytes) {
     __shared__ float paths[kTopK + 1][Rows];
-    pdl::wait_for_dependencies();
     const int warp     = static_cast<int>(threadIdx.x) >> 5;
     const int lane     = static_cast<int>(threadIdx.x) & 31;
     const int row_base = static_cast<int>(blockIdx.x) * Rows;
@@ -517,6 +503,8 @@ void launch_d1(const Tensor& x, const SparseMoeWeights& weights,
 template <class Codec>
 void launch_d3_dependent_codec(const Tensor& x, const SparseMoeWeights& weights,
                                const SparseMoeDecodeWorkspace& workspace, cudaStream_t stream) {
+    // Programmatic Dependent Launch is sm_90+. On Ada, ordinary launches on this stream preserve
+    // the D1 -> D2 -> D3 -> D4 data dependencies exactly, at the cost of pipeline overlap.
     const auto* input         = static_cast<const __nv_bfloat16*>(x.data);
     const auto* ids           = static_cast<const int*>(workspace.ids.data);
     auto* act                 = static_cast<float*>(workspace.scratch.data);
@@ -525,9 +513,9 @@ void launch_d3_dependent_codec(const Tensor& x, const SparseMoeWeights& weights,
     const auto* routed_scales = static_cast<const std::uint8_t*>(weights.routed_gate_up.scales);
     const auto* shared_codes  = static_cast<const std::uint8_t*>(weights.shared_gate_up.qdata);
     const auto* shared_scales = static_cast<const std::uint8_t*>(weights.shared_gate_up.scales);
-    CUDA_CHECK(pdl::launch_dependent(
-        {dim3(kIntermediate), dim3(9 * 32), 0, stream}, sparse_moe_d3_nine_warp_kernel<Codec>,
-        input, ids, routed_codes, routed_high, routed_scales, shared_codes, shared_scales, act));
+    sparse_moe_d3_nine_warp_kernel<Codec><<<kIntermediate, 9 * 32, 0, stream>>>(
+        input, ids, routed_codes, routed_high, routed_scales, shared_codes, shared_scales, act);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_d2_d3(const Tensor& x, const SparseMoeWeights& weights,
@@ -565,11 +553,11 @@ void launch_d4_dependent_codec(const SparseMoeWeights& weights, Tensor& destinat
     const auto* shared_codes  = static_cast<const std::uint8_t*>(weights.shared_down.qdata);
     const auto* shared_scales = static_cast<const std::uint8_t*>(weights.shared_down.scales);
     auto* output              = static_cast<__nv_bfloat16*>(destination.data);
-    CUDA_CHECK(pdl::launch_dependent(
-        {dim3(kHidden), dim3(9 * 32), 0, stream}, sparse_moe_d4_nine_warp_kernel<Codec, 1>, ids,
-        alpha, shared_scale, act, routed_codes, routed_high, routed_scales, shared_codes,
+    sparse_moe_d4_nine_warp_kernel<Codec, 1><<<kHidden, 9 * 32, 0, stream>>>(
+        ids, alpha, shared_scale, act, routed_codes, routed_high, routed_scales, shared_codes,
         shared_scales, output, static_cast<const char*>(prefetch_data),
-        static_cast<unsigned long long>(prefetch_bytes)));
+        static_cast<unsigned long long>(prefetch_bytes));
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_d4_dependent(const SparseMoeWeights& weights, Tensor& destination,
@@ -611,11 +599,11 @@ void launch_d3_small_t_paths(const Tensor& x, const SparseMoeWeights& weights, c
                 shared_scales, token_activations, tokens, adaptive_route_jobs);
         CUDA_CHECK(cudaGetLastError());
     } else {
-        CUDA_CHECK(pdl::launch_dependent(
-            {dim3(kIntermediate, tokens * kPathBlocks), dim3(PathsPerBlock * 32), 0, stream},
-            sparse_moe_d3_path_tiled_kernel<Codec, PathsPerBlock, false>, input, token_ids,
-            routed_codes, routed_high, routed_scales, shared_codes, shared_scales,
-            token_activations, tokens, nullptr));
+        sparse_moe_d3_path_tiled_kernel<Codec, PathsPerBlock, false>
+            <<<dim3(kIntermediate, tokens * kPathBlocks), PathsPerBlock * 32, 0, stream>>>(
+                input, token_ids, routed_codes, routed_high, routed_scales, shared_codes,
+                shared_scales, token_activations, tokens, nullptr);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 

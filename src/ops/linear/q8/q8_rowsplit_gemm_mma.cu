@@ -20,9 +20,10 @@ void launch_slice(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t st
     const dim3 grid(static_cast<unsigned>(div_up(rows, Schedule::BM)),
                     static_cast<unsigned>(div_up(cols, Schedule::BN)), 1u);
     const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), rows};
-    q8_rowsplit_gemm_mma_kernel<Schedule, Full><<<grid, Schedule::THREADS, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
-        static_cast<const std::uint8_t*>(w.scales), output, rows, k, cols, padded_k);
+    launch_q8_rowsplit_gemm_mma<Schedule, Full, Q8Epilogue::Store, Q8ContiguousOutput>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint8_t*>(w.scales),
+        output, rows, k, cols, padded_k);
     CUDA_CHECK(cudaGetLastError());
 }
 

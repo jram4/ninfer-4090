@@ -14,10 +14,11 @@ void launch(const Tensor& x, const Weight& w, Tensor& residual, cudaStream_t str
     constexpr int kTokenGroups = 4;
     const dim3 grid(5120 / 16, div_up(x.ne[1], kColumns));
     const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(residual.data), 5120};
-    q8_ksplit_grouped_mma_kernel<K, kColumns, kSplits, kTokenGroups, 1, Q8ContiguousOutput, true,
-                                 true><<<grid, kSplits * kTokenGroups * 32, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
-        static_cast<const std::uint8_t*>(w.scales), output, x.ne[1]);
+    launch_q8_ksplit_grouped_mma<K, kColumns, kSplits, kTokenGroups, 1, Q8ContiguousOutput, true,
+                                 true>(
+        grid, stream, static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint8_t*>(w.scales),
+        output, x.ne[1]);
     CUDA_CHECK(cudaGetLastError());
 }
 

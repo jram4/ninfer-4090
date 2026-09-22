@@ -1,7 +1,6 @@
 #include "ops/sparse_moe/small_t/sparse_moe_small_t.h"
 
 #include "core/device.h"
-#include "core/pdl.cuh"
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
 #include "ops/sparse_moe/decode/sparse_moe_decode.h"
@@ -28,7 +27,6 @@ __global__ void sparse_moe_small_t_s1_kernel(const __nv_bfloat16* __restrict__ x
                                              float* __restrict__ partial_scores) {
     static_assert(Tokens >= 1 && Tokens <= kSparseMoeSmallTMax);
     __shared__ float partial[kRouterWarps][Tokens];
-    if (threadIdx.x == 0) { pdl::trigger_dependents(); }
     const int row       = static_cast<int>(blockIdx.x) / kRouterPartitions;
     const int partition = static_cast<int>(blockIdx.x) - row * kRouterPartitions;
     const int warp      = static_cast<int>(threadIdx.x) >> 5;
@@ -85,8 +83,6 @@ __global__ void sparse_moe_small_t_s2_kernel(const float* __restrict__ partial_s
     __shared__ float selected_logits[kTopK];
     const int tid   = static_cast<int>(threadIdx.x);
     const int token = static_cast<int>(blockIdx.x);
-    if (tid == 0) { pdl::trigger_dependents(); }
-    pdl::wait_for_dependencies();
     for (int row = tid; row < kRouterRows; row += kS2Threads) {
         float sum = 0.0f;
 #pragma unroll
@@ -116,9 +112,11 @@ void launch_s1(const __nv_bfloat16* x, const __nv_bfloat16* router, float* parti
 
 void launch_s2(const float* partial_scores, int* token_ids, float* token_alpha, float* shared_scale,
                std::int32_t tokens, cudaStream_t stream) {
-    CUDA_CHECK(pdl::launch_dependent(
-        {dim3(static_cast<unsigned int>(tokens)), dim3(kS2Threads), 0, stream},
-        sparse_moe_small_t_s2_kernel, partial_scores, token_ids, token_alpha, shared_scale));
+    // PDL is sm_90+. The surrounding S1 -> S2 -> S3 -> S4 launches all use this stream, so Ada's
+    // ordinary stream ordering preserves the dependencies while giving up only cross-grid overlap.
+    sparse_moe_small_t_s2_kernel<<<static_cast<unsigned int>(tokens), kS2Threads, 0, stream>>>(
+        partial_scores, token_ids, token_alpha, shared_scale);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_s3_tiled(const Tensor& x, const SparseMoeWeights& weights,
