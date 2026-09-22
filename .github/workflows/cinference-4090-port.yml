@@ -36,6 +36,8 @@ jobs:
         run: |
           set -euxo pipefail
           grep -q 'CMAKE_CUDA_ARCHITECTURES 89' CMakeLists.txt
+          grep -q 'CMAKE_CUDA_ARCHITECTURES STREQUAL "89"' CMakeLists.txt
+          ! grep -q 'STREQUAL "120a"' CMakeLists.txt
           grep -q -- '--cuda-gpu-arch=sm_89' .clangd
           grep -q 'compute_capability() != 89' src/models/qwen3_5/program/planning/startup.cpp
           grep -q 'draft_tokens > 10' src/product/speculative_options.h
