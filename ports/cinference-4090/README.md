@@ -22,12 +22,13 @@ The overlay:
    `sm_89` / CC 8.9;
 2. preserves Cinference MTP-10 and its expanded CPU/GPU speculative buffers;
 3. preserves capture-derived CUDA Graph topology reuse;
-4. changes the FP8 E4M3 MMA spelling to the native Ada SM89 instruction form,
-   allowing the K8V4 attention path to remain available;
-5. preserves groupwise Q4/Q5/Q6/Q8/BF16 weight execution;
-6. removes compilation of Blackwell-only NVFP4 TMA / `setmaxnreg` units and
+4. changes the FP8 E4M3 MMA spelling to the native Ada SM89 instruction form;
+5. replaces Blackwell-only E2M1 conversion PTX with an explicit RN-even,
+   satfinite software codec so the K8V4 cache path can remain available on Ada;
+6. preserves groupwise Q4/Q5/Q6/Q8/BF16 weight execution;
+7. removes compilation of Blackwell-only NVFP4 TMA / `setmaxnreg` units and
    supplies fail-closed ABI stubs for those launch routes;
-7. does **not** requantize model weights.
+8. does **not** requantize model weights.
 
 ## Intended artifact
 
@@ -53,3 +54,11 @@ cmake --build build-sm89 -j
 
 Do not call the port production-ready until it builds on the RTX 4090 and exact
 greedy-output equivalence plus representative throughput/acceptance tests pass.
+
+
+## Materialized source branch
+
+The staging workflow publishes the patched full Cinference source as
+`cinference-4090-source` in this repository. That branch has the pinned
+Cinference commit as its history base and the Ada port as a normal source
+commit, so it can be cloned/built directly without running the overlay script.
