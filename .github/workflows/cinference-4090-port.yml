@@ -69,3 +69,37 @@ jobs:
           git commit -m "port: retarget Cinference to RTX 4090 Ada"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force origin HEAD:refs/heads/cinference-4090-source
+
+  compile-sm89:
+    needs: validate-overlay
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:13.0.2-devel-ubuntu24.04
+    steps:
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates git cmake ninja-build pkg-config \
+            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev
+
+      - name: Checkout materialized RTX 4090 source
+        uses: actions/checkout@v4
+        with:
+          ref: cinference-4090-source
+          fetch-depth: 1
+
+      - name: Configure sm89
+        shell: bash
+        run: |
+          cmake -S . -B build-sm89 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=89 \
+            -DNINFER_BUILD_APPS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DNINFER_BUILD_BENCHMARKS=OFF
+
+      - name: Compile sm89
+        shell: bash
+        run: cmake --build build-sm89 -j2
