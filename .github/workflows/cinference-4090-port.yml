@@ -6,6 +6,9 @@ on:
       - cinference-4090-port
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   validate-overlay:
     runs-on: ubuntu-latest
@@ -39,9 +42,26 @@ jobs:
           grep -q 'kMtpDecodeMaximumDrafts    = 10' src/models/qwen3_5/program/round_buffers.h
           grep -q 'topology_signature' src/core/decode_graph.cpp
           grep -q 'mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32' src/ops/common/mma.cuh
+          grep -q 'encode_nvfp4_e2m1' src/ops/linear/nvfp4/nvfp4_codec.cuh
+          ! grep -q '#include <cuda_fp4.h>' src/ops/linear/nvfp4/nvfp4_codec.cuh
+          ! grep -q '__nv_fp4x2_e2m1' src/ops/kv_cache/nvfp4_group16_codec.cuh
           grep -q 'sm89_blackwell_stubs.cu' src/ops/CMakeLists.txt
           test -f src/ops/sm89_blackwell_stubs.cu
           ! grep -q 'nvfp4_w4a4_tma.cu' src/ops/linear/nvfp4/sources.cmake
           ! grep -q 'nvfp4_linear_swiglu_w4a4_tma.cu' src/ops/linear_swiglu/sources.cmake
           ! grep -q 'prompt_nvfp4_non_rdc.cu' src/ops/softmax_attention/sources.cmake
           git diff --check
+
+      - name: Materialize patched source branch
+        working-directory: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "port: retarget Cinference to RTX 4090 Ada"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin HEAD:refs/heads/cinference-4090-source
