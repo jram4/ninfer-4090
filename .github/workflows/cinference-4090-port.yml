@@ -1,0 +1,47 @@
+name: cinference-4090-port
+
+on:
+  push:
+    branches:
+      - cinference-4090-port
+  workflow_dispatch:
+
+jobs:
+  validate-overlay:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout staging branch
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned Cinference
+        uses: actions/checkout@v4
+        with:
+          repository: satellitedown/cinference
+          ref: 2205806b3e9d12b23673a146eab1d36755ebc3a0
+          path: upstream
+
+      - name: Syntax-check overlay
+        run: python -m py_compile ports/cinference-4090/apply_port.py
+
+      - name: Apply RTX 4090 overlay
+        working-directory: upstream
+        run: python ../ports/cinference-4090/apply_port.py
+
+      - name: Verify port invariants
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euxo pipefail
+          grep -q 'CMAKE_CUDA_ARCHITECTURES 89' CMakeLists.txt
+          grep -q -- '--cuda-gpu-arch=sm_89' .clangd
+          grep -q 'compute_capability() != 89' src/models/qwen3_5/program/planning/startup.cpp
+          grep -q 'draft_tokens > 10' src/product/speculative_options.h
+          grep -q 'kMtpDecodeMaximumDrafts    = 10' src/models/qwen3_5/program/round_buffers.h
+          grep -q 'topology_signature' src/core/decode_graph.cpp
+          grep -q 'mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32' src/ops/common/mma.cuh
+          grep -q 'sm89_blackwell_stubs.cu' src/ops/CMakeLists.txt
+          test -f src/ops/sm89_blackwell_stubs.cu
+          ! grep -q 'nvfp4_w4a4_tma.cu' src/ops/linear/nvfp4/sources.cmake
+          ! grep -q 'nvfp4_linear_swiglu_w4a4_tma.cu' src/ops/linear_swiglu/sources.cmake
+          ! grep -q 'prompt_nvfp4_non_rdc.cu' src/ops/softmax_attention/sources.cmake
+          git diff --check
