@@ -9,7 +9,7 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cinf_k_bench import build_archive
 
-ROOT = os.environ.get("CINF_ROOT", "/home/aramirezfamily/josh/cinference-4090")
+ROOT = os.environ.get("CINF_ROOT", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 BIN = os.environ.get("CINF_BIN", f"{ROOT}/build-sm89-perf/apps/ninfer-serve")
 MODEL = f"{ROOT}/models/qwen3_8_27b.v3.ninfer"
 OUT, K, MODE = sys.argv[1], int(sys.argv[2]), sys.argv[3]

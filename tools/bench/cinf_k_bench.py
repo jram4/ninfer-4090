@@ -10,7 +10,7 @@ repetition.
 """
 import argparse, hashlib, json, os, random, subprocess, sys, time, urllib.request
 
-ROOT = os.environ.get("CINF_ROOT", "/home/aramirezfamily/josh/cinference-4090")
+ROOT = os.environ.get("CINF_ROOT", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 DEFAULT_BIN = os.environ.get("CINF_BIN", f"{ROOT}/build-sm89/apps/ninfer-serve")
 DEFAULT_MODEL = f"{ROOT}/models/qwen3_8_27b.v3.ninfer"
 MODEL_ID = "qwen3.8-27b"

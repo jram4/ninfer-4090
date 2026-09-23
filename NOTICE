@@ -46,3 +46,13 @@ artifact uses fixed mixed FP8/NVFP4 weights from unsloth/Qwen3.8-27B-NVFP4.
 The original model cards and their additional source/license notices remain
 in model-cards/. No model weights are included in this source distribution.
 Downloaded model artifacts carry their own applicable licenses and notices.
+
+RTX 4090 port
+https://github.com/jram4/ninfer-4090 (branch ada-k10-perf)
+
+The RTX 4090 port retargets Cinference to NVIDIA Ada (sm_89). Its changes
+add Ada small-T tensor-core kernels for Q4/Q5 projections, an FP16
+bit-placement NVFP4 KV-value decode, single-pass K8V4 attention for verify
+widths 9-16, a llama.cpp-family /metrics endpoint, benchmark tooling, and
+deployment examples. RTX 4090 measurements are in results/rtx4090-20260923/.
+The GitHub fork parent is https://github.com/Don-Chad/ninfer-3090.

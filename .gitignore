@@ -69,3 +69,5 @@ profiles/
 /.codex/
 releases/
 bench_results_*/
+deploy/**/*.env
+profiles/

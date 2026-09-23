@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cinf_k_bench import (DEFAULT_MODEL, build_archive, first_divergence, metrics, mode_args, post,
                           request_rows, wait_health)
 
-ROOT = os.environ.get("CINF_ROOT", "/home/aramirezfamily/josh/cinference-4090")
+ROOT = os.environ.get("CINF_ROOT", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 CODE_PROMPT = ("Write a complete Python module implementing an LRU cache class with get, put and delete, "
                "followed by at most five concise unittest test methods that exercise eviction order. Put everything "
