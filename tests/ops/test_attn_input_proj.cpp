@@ -25,6 +25,14 @@ using namespace ninfer::test::input_projection;
 
 namespace {
 
+bool blackwell_device() {
+    int device = 0;
+    cudaDeviceProp properties{};
+    return cudaGetDevice(&device) == cudaSuccess &&
+           cudaGetDeviceProperties(&properties, device) == cudaSuccess && properties.major >= 10;
+}
+
+
 // This criterion belongs to the complete A16 attention-input-projection Op.
 constexpr ReductionCriterion kAttnInputProjA16Tolerance{2.9e-3, 4.0e-3, 4.5e-3};
 // FP8 A16 reuses the qualified Linear decode arithmetic profile rather than the other A16
@@ -415,6 +423,14 @@ int run_nvfp4_target() {
     return failures;
 }
 
+int run_nvfp4_target_if_supported() {
+    if (!blackwell_device()) {
+        std::cout << "SKIP: native NVFP4 attention input weights require Blackwell\n";
+        return 0;
+    }
+    return run_nvfp4_target();
+}
+
 int run_fp8_target() {
     constexpr std::int32_t kHidden = 5120;
     constexpr std::int32_t kRows   = 14336;
@@ -597,7 +613,7 @@ int run_weight_inputs() {
             }
         }
     }
-    failures += run_nvfp4_target();
+    failures += run_nvfp4_target_if_supported();
     failures += run_q8_dflash2();
     return failures;
 }
@@ -621,7 +637,7 @@ int main(int argc, char** argv) {
     if (!dflash2_only) {
         failures += run_q4_q5();
         failures += run_bf16_target();
-        failures += run_nvfp4_target();
+        failures += run_nvfp4_target_if_supported();
         failures += run_fp8_target();
         failures += run_q8_target();
         failures += run_q8_companion();
