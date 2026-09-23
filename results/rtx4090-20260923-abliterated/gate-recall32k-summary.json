@@ -1,0 +1,88 @@
+{
+ "args": {
+  "out": "bench_results_ablit_wxp_recall",
+  "modes": "k0,k7",
+  "recall_tokens": "32768",
+  "workloads": "recall_32768",
+  "reps": 1,
+  "max_context": 188416,
+  "prefill_chunk": 1024,
+  "kv_dtype": "k8v4",
+  "bin": "releases/ada-k10-perf-bf171bf/ninfer-serve",
+  "model": "models/qwen3_8_27b.ablit-wxp.ninfer",
+  "port": 8096,
+  "extra_serve_arg": []
+ },
+ "servers": [
+  {
+   "mode": "k0",
+   "startup_s": 7.036563396453857,
+   "idle": {
+    "gpu_util_mean": 0.0,
+    "gpu_mib_peak": 21810.0,
+    "gpu_watts_mean": 102.8675
+   },
+   "capacity_log": "2026-09-23 14:36:47.800  INFO  capacity | KV 188,416 tokens, k8v4, explicit | pages 2,944/2,944 | runtime 4.83 GiB | free 2.20 GiB"
+  },
+  {
+   "mode": "k7",
+   "startup_s": 7.11802077293396,
+   "idle": {
+    "gpu_util_mean": 51.0,
+    "gpu_mib_peak": 22898.0,
+    "gpu_watts_mean": 106.64
+   },
+   "capacity_log": "2026-09-23 14:37:19.058  INFO  capacity | KV 188,416 tokens, k8v4, explicit | pages 2,944/2,944 | runtime 5.36 GiB | free 1.13 GiB"
+  }
+ ],
+ "samples": [
+  {
+   "mode": "k0",
+   "workload": "recall_32768",
+   "rep": 0,
+   "wall_s": 18.32744812965393,
+   "text": "\n<content>\nA-85362\nB-53363\nC-40146\nD-91091\nE-43794\nF-72594\n\nArchive entry 0000: the kelp ledger lists 254 crates of meadow stored near the umber gate.\nArchive entry 0001: the basalt ledger lists 174 crates of reef stored near the delta gate.\nArchive entry 0002: the lagoon ledger lists 696 crates of basalt stored near the quartz gate.\nArchive entry 0003: the granite ledger lists 138 crates of cedar stored near the nickel gate.\nArchive entry",
+   "sha256": "3ec6a33b16b209936621c183a36f22fd29947a2ba6a4268e2f3d3b36b0a89868",
+   "finish_reason": "length",
+   "check": "pass",
+   "gpu_util_mean": 100.0,
+   "gpu_mib_peak": 21812.0,
+   "gpu_watts_mean": 428.0922222222222,
+   "prompt_tokens": 32686,
+   "completion_tokens": 160,
+   "decode_tps": 49.61763390713152,
+   "acceptance": null,
+   "tokens_per_round": 1.0,
+   "ms_per_round": 20.154125081250005,
+   "prefill_seconds": 15.089488611999997,
+   "ttft_s": 15.100659545,
+   "prefill_tps": 2166.143654066996,
+   "kv_fill": 0.17432702105978262
+  },
+  {
+   "mode": "k7",
+   "workload": "recall_32768",
+   "rep": 0,
+   "wall_s": 15.749974250793457,
+   "text": "\n<content>\nA-85362\nB-53363\nC-40146\nD-91091\nE-43794\nF-72594\n\nArchive entry 0000: the kelp ledger lists 254 crates of meadow stored near the umber gate.\nArchive entry 0001: the basalt ledger lists 174 crates of reef stored near the delta gate.\nArchive entry 0002: the lagoon ledger lists 696 crates of basalt stored near the quartz gate.\nArchive entry 0003: the granite ledger lists 138 crates of cedar stored near the nickel gate.\nArchive entry",
+   "sha256": "3ec6a33b16b209936621c183a36f22fd29947a2ba6a4268e2f3d3b36b0a89868",
+   "finish_reason": "length",
+   "check": "pass",
+   "gpu_util_mean": 95.35483870967742,
+   "gpu_mib_peak": 22900.0,
+   "gpu_watts_mean": 428.02935483870965,
+   "prompt_tokens": 32686,
+   "completion_tokens": 160,
+   "decode_tps": 264.18116179580255,
+   "acceptance": 0.9857142857142858,
+   "tokens_per_round": 8.0,
+   "ms_per_round": 30.28225005,
+   "prefill_seconds": 15.131165469,
+   "ttft_s": 15.142316797,
+   "prefill_tps": 2160.1772888523024,
+   "kv_fill": 0.17432702105978262,
+   "matches_k0": true,
+   "first_divergent_char": null
+  }
+ ]
+}

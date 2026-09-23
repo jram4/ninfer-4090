@@ -242,6 +242,41 @@ differs from the benchmarked one only in those 16 bytes. To check a rebuild:
 cmp -l models/qwen3_8_27b.v3.ninfer /path/to/reference.v3.ninfer | awk '$1<17||$1>32' | wc -l   # 0
 ```
 
+### Abliterated variant (current FNN deployment)
+
+FNN currently serves
+[windowsxp811203/Qwen3.8-27B-Abliterated](https://huggingface.co/windowsxp811203/Qwen3.8-27B-Abliterated),
+revision `40519381cd229c0bd9a54470122e59d592ed534b`. That model is stock Qwen3.8-27B with a
+refusal direction projected out of 131 residual-writing tensors; its `config.json` is identical to
+stock. It was converted from the BF16 weights with the same official recipe as the stock artifact:
+
+```bash
+python3 -m tools.convert --model /path/to/Qwen3.8-27B-Abliterated --recipe qwen3_8_27b \
+  --components text,vision,mtp \
+  --resource chat_template.jinja=tools/chat_templates/qwen3_8.jinja \
+  --proposal --name qwen3.8-27b --out models/qwen3_8_27b.ablit-wxp.ninfer
+```
+
+- **Tooling:** converter from commit `b40d66d`, run with PyTorch 2.14 on CUDA. Conversion took
+  127 s.
+- **Output:** 18,210,704,128 bytes, SHA-256
+  `b7c6693244cf7ab08554fff41c4f3c67695b6ec388c99eed6f12e0e71046fda8`.
+- **Checks** (production flags, 1 repetition,
+  [`results/rtx4090-20260923-abliterated/`](results/rtx4090-20260923-abliterated/)): every check
+  passes at K0 and K7.
+
+| Workload | Abliterated K7 tok/s | Acceptance | Stock K7 tok/s | Acceptance |
+|---|---:|---:|---:|---:|
+| short answer | 111.3 | 0.71 | 112.2 | 0.71 |
+| structured JSON | 236.4 | 0.75 | 228.0 | 0.72 |
+| prose | 88.6 | 0.19 | 87.7 | 0.19 |
+| reasoning | 164.6 | 0.49 | 179.9 | 0.54 |
+| needle recall 32K | 264.2 | 0.99 | 263.1 | 0.99 |
+
+K0 decode is 52.8–53.1 tok/s, the same as stock. The 32K recall output is byte-identical to K0.
+The server starts at 188,416 tokens with 997 MiB free, the same as stock. A request that stock
+models typically refuse was answered.
+
 ## Build
 
 Requirements: Linux, CUDA 13.x, CMake ≥ 3.28, Ninja, and an RTX 4090 or another sm_89 GPU.
