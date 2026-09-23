@@ -6,7 +6,7 @@
 #include "ops/linear/q4/q4_ksplit_mma.cuh"
 #include "ops/linear/q4/q4_ksplit_strided_store.cuh"
 #include "ops/linear/q4/q4_rowsplit_gemv.cuh"
-#include "ops/linear/q5/q5_ada_small_t_mma.cuh"
+#include "ops/linear/ada_small_t_mma.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemv.cuh"
 
@@ -123,6 +123,8 @@ void launch_q4(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t 
 }
 
 struct GdnValueZEpilogue {
+    static constexpr bool kPairedHalves = false;
+
     __nv_bfloat16* value;
     std::int32_t value_ld;
     __nv_bfloat16* z;
@@ -156,12 +158,12 @@ void launch_q5_ada(const Tensor& x, const Weight& weight, Tensor& value, Tensor&
     if (x.ne[1] <= 8) {
         using S = Q5AdaSmallTSchedule<RowTiles, Warps, 1, G, Stages>;
         static_assert(kValueZRows % S::kRowsPerCta == 0);
-        q5_ada_small_t_mma_launch<S, kHidden>(xp, x_ld, code, hi, sc, kValueZRows, x.ne[1],
+        ada_small_t_mma_launch<S, kHidden>(xp, x_ld, code, hi, sc, kValueZRows, x.ne[1],
                                               epilogue, stream);
     } else {
         using S = Q5AdaSmallTSchedule<RowTiles, Warps, 2, G, Stages>;
         static_assert(kValueZRows % S::kRowsPerCta == 0);
-        q5_ada_small_t_mma_launch<S, kHidden>(xp, x_ld, code, hi, sc, kValueZRows, x.ne[1],
+        ada_small_t_mma_launch<S, kHidden>(xp, x_ld, code, hi, sc, kValueZRows, x.ne[1],
                                               epilogue, stream);
     }
     CUDA_CHECK(cudaGetLastError());

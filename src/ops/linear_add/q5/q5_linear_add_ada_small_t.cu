@@ -2,7 +2,7 @@
 #include "ops/linear_add/q5/q5_linear_add_kernels.h"
 
 #include "core/device.h"
-#include "ops/linear/q5/q5_ada_small_t_mma.cuh"
+#include "ops/linear/ada_small_t_mma.cuh"
 
 #include <cuda_bf16.h>
 
@@ -13,6 +13,8 @@ namespace ninfer::ops::detail {
 namespace {
 
 struct ResidualEpilogue {
+    static constexpr bool kPairedHalves = false;
+
     __nv_bfloat16* out;
     std::int32_t out_ld;
 
@@ -38,13 +40,13 @@ void launch(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t
         if (rows % S::kRowsPerCta != 0) {
             throw std::invalid_argument("q5 linear_add ada small-T: rows must tile the CTA");
         }
-        q5_ada_small_t_mma_launch<S, K>(xp, x_ld, code, hi, sc, rows, x.ne[1], epilogue, stream);
+        ada_small_t_mma_launch<S, K>(xp, x_ld, code, hi, sc, rows, x.ne[1], epilogue, stream);
     } else {
         using S = Q5AdaSmallTSchedule<RowTiles, Warps, 2, G, Stages>;
         if (rows % S::kRowsPerCta != 0) {
             throw std::invalid_argument("q5 linear_add ada small-T: rows must tile the CTA");
         }
-        q5_ada_small_t_mma_launch<S, K>(xp, x_ld, code, hi, sc, rows, x.ne[1], epilogue, stream);
+        ada_small_t_mma_launch<S, K>(xp, x_ld, code, hi, sc, rows, x.ne[1], epilogue, stream);
     }
 }
 

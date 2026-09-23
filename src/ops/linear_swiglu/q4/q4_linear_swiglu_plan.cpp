@@ -32,9 +32,12 @@ struct RouteSpec {
 
 constexpr Q4LinearSwiGluProblem kShape{34816, 17408, 5120, 5120, 1};
 
-constexpr std::array<RouteSpec, 10> kRoutes{{
+// T = 2..16 is the speculative verify band: the Ada small-T kernel reads the gate/up weights once for
+// every width in it, where the K-split tile slows down from T=9.
+constexpr std::array<RouteSpec, 11> kRoutes{{
     {{1, 1}, Q4LinearSwiGluScheduleId::GemvPair},
-    {{2, 32}, Q4LinearSwiGluScheduleId::SmallTTiled},
+    {{2, 16}, Q4LinearSwiGluScheduleId::AdaSmallTMma},
+    {{17, 32}, Q4LinearSwiGluScheduleId::SmallTTiled},
     {{33, 128}, Q4LinearSwiGluScheduleId::Materialized},
     {{129, 168}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128Tail},
     {{169, 224}, Q4LinearSwiGluScheduleId::Materialized},
@@ -80,6 +83,8 @@ const char* q4_linear_swiglu_schedule_name(Q4LinearSwiGluScheduleId schedule) no
     switch (schedule) {
     case Q4LinearSwiGluScheduleId::GemvPair:
         return "linear_swiglu.q4.gemv.paired_rows";
+    case Q4LinearSwiGluScheduleId::AdaSmallTMma:
+        return "linear_swiglu.q4.ada.small_t.mma";
     case Q4LinearSwiGluScheduleId::SmallTTiled:
         return "linear_swiglu.q4.mma.small_t.tiled";
     case Q4LinearSwiGluScheduleId::Materialized:
@@ -110,6 +115,7 @@ Q4LinearSwiGluPlan q4_linear_swiglu_resolve_plan(const Q4LinearSwiGluProblem& pr
         };
         switch (route.schedule) {
         case Q4LinearSwiGluScheduleId::GemvPair:
+        case Q4LinearSwiGluScheduleId::AdaSmallTMma:
         case Q4LinearSwiGluScheduleId::SmallTTiled:
         case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128:
         case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128Tail:
@@ -154,6 +160,9 @@ void q4_linear_swiglu_execute_plan(const Q4LinearSwiGluPlan& plan, const Tensor&
     switch (plan.schedule) {
     case Q4LinearSwiGluScheduleId::GemvPair:
         q4_linear_swiglu_gemv_pair_launch(x, w, out, stream);
+        return;
+    case Q4LinearSwiGluScheduleId::AdaSmallTMma:
+        q4_linear_swiglu_ada_small_t_launch(x, w, out, stream);
         return;
     case Q4LinearSwiGluScheduleId::SmallTTiled:
         q4_linear_swiglu_small_t_tiled_launch(x, w, out, stream);

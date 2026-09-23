@@ -6,7 +6,7 @@
 #include "ops/linear/q4/q4_ksplit_mma.cuh"
 #include "ops/linear/q4/q4_ksplit_strided_store.cuh"
 #include "ops/linear/q4/q4_rowsplit_gemv.cuh"
-#include "ops/linear/q5/q5_ada_small_t_mma.cuh"
+#include "ops/linear/ada_small_t_mma.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemv.cuh"
 
@@ -174,6 +174,8 @@ void launch_q5_split4_exact(const Tensor& x, const Weight& weight, Tensor& gate,
 }
 
 struct AttnGateValueEpilogue {
+    static constexpr bool kPairedHalves = false;
+
     __nv_bfloat16* gate;
     std::int32_t gate_ld;
     __nv_bfloat16* value;
@@ -208,12 +210,12 @@ void launch_q5_ada(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& 
     if (x.ne[1] <= 8) {
         using S = Q5AdaSmallTSchedule<RowTiles, Warps, 1, G, Stages>;
         static_assert(kParentRows % S::kRowsPerCta == 0);
-        q5_ada_small_t_mma_launch<S, kHidden>(xp, x_ld, code, hi, sc, kParentRows, x.ne[1],
+        ada_small_t_mma_launch<S, kHidden>(xp, x_ld, code, hi, sc, kParentRows, x.ne[1],
                                               epilogue, stream);
     } else {
         using S = Q5AdaSmallTSchedule<RowTiles, Warps, 2, G, Stages>;
         static_assert(kParentRows % S::kRowsPerCta == 0);
-        q5_ada_small_t_mma_launch<S, kHidden>(xp, x_ld, code, hi, sc, kParentRows, x.ne[1],
+        ada_small_t_mma_launch<S, kHidden>(xp, x_ld, code, hi, sc, kParentRows, x.ne[1],
                                               epilogue, stream);
     }
     CUDA_CHECK(cudaGetLastError());

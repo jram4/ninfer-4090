@@ -39,7 +39,7 @@ constexpr std::array<SupportSpec, 2> kSupports{{
 
 // T <= 16 is the speculative verify band. On Ada the single-pass small-T MMA reads each weight
 // byte once for every width in it, while split2 turns FMA-bound from T=8 and the r64 MMA tiles
-// stream weights at a fraction of bandwidth (docs/performance/ada-k10-round-breakdown.md).
+// stream weights at a fraction of bandwidth.
 constexpr std::array<RouteSpec, 6> kK6144Routes{{
     {{1, 16}, Q5LinearAddScheduleId::AdaSmallTMmaResidual},
     {{17, 32}, Q5LinearAddScheduleId::MmaResidualR64C16},
