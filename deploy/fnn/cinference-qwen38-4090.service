@@ -12,7 +12,7 @@ Type=simple
 WorkingDirectory=%h/josh/cinference-4090
 Environment=PATH=%h/.local/bin:/usr/local/cuda-13/bin:/usr/bin:/bin
 Environment=LD_LIBRARY_PATH=/usr/local/cuda-13/lib64
-EnvironmentFile=%h/josh/cinference-4090/deploy/fnn/cinference-qwen38-4090.env
+EnvironmentFile=%h/.config/cinference/qwen38.env
 ExecStartPre=/usr/bin/test -x ${CINF_BIN}
 ExecStartPre=/usr/bin/test -r ${CINF_MODEL}
 ExecStartPre=/usr/bin/install -d -m 700 %h/josh/cinference-4090/profiles/serve

@@ -205,11 +205,42 @@ ceiling on 24 GB with about 1 GiB of headroom.
     requires a smaller draft head in the artifact, not kernel work.
 - **Blackwell-only paths:** native NVFP4 weight kernels and TMA prompt kernels fail closed on
   Ada. `ninfer_softmax_attention_test` in full or `--nvfp4-only` mode aborts on those stubs.
-- **Model artifact:** benchmarks used a locally built NInfer v3 artifact: Q4/Q5 Text body, Q8
-  embedding and output head, 18,210,749,936 bytes, SHA-256 `5f67e9e4…c274d`. It is not
-  redistributed here. The public
-  [neroued/Qwen3.8-27B-NInfer](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) artifact has
-  the same format family but was not benchmarked here.
+- **Model artifact:** the benchmarked artifact is not redistributed here. See
+  [Model artifact](#model-artifact) for how to recreate it.
+
+## Model artifact
+
+All results use `qwen3_8_27b.v3.ninfer`: stock Qwen3.8-27B (not an abliterated or fine-tuned
+variant). It has a Q4/Q5 groupwise-int Text body with Q8 (`q8_g32_fp16`) token embedding and
+output head, and includes the MTP and proposal-head weights. The quantization choices are
+upstream's; this port doesn't requantize anything.
+
+1. **Source:** [neroued/Qwen3.8-27B-NInfer](https://huggingface.co/neroued/Qwen3.8-27B-NInfer)
+   at revision `3526913004b1cf552cb57b88d6a5c6f5e4a89a70`. That is the v2 container,
+   `qwen3_8_27b.ninfer`, 18,210,531,328 bytes, SHA-256
+   `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e`. The current `main`
+   revision is a different, 20.4 GB v3 artifact with DFlash2 weights, and it was not benchmarked.
+2. **Conversion:** upgrade the container with
+   [`tools/upgrade_ninfer_v2_to_v3.py`](tools/upgrade_ninfer_v2_to_v3.py). This file is unchanged
+   from upstream Cinference `b74044f`; its SHA-256 is `e110228d…c8b54`. The script copies weight
+   bytes unchanged and installs the maintained `qwen3_8.jinja` chat template.
+3. **Output:** 18,210,749,936 bytes. The benchmarked file's SHA-256 is
+   `5f67e9e4cfc7d17405247d37faddd7f9fd86c47810fce9c42785b259d68c274d`.
+
+```bash
+hf download neroued/Qwen3.8-27B-NInfer qwen3_8_27b.ninfer \
+  --revision 3526913004b1cf552cb57b88d6a5c6f5e4a89a70 --local-dir models/v2
+echo 'eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e  models/v2/qwen3_8_27b.ninfer' | sha256sum -c
+python3 tools/upgrade_ninfer_v2_to_v3.py models/v2/qwen3_8_27b.ninfer models/qwen3_8_27b.v3.ninfer
+```
+
+The upgrade writes a random 16-byte container identity (bytes 17–32), so a rebuilt file's
+SHA-256 won't match. Re-running the upgrade on the original machine produced a file that
+differs from the benchmarked one only in those 16 bytes. To check a rebuild:
+
+```bash
+cmp -l models/qwen3_8_27b.v3.ninfer /path/to/reference.v3.ninfer | awk '$1<17||$1>32' | wc -l   # 0
+```
 
 ## Build
 
@@ -247,9 +278,10 @@ The server exposes the OpenAI Chat Completions and Responses APIs, the Anthropic
 
 The deployment files are in [`deploy/fnn/`](deploy/fnn/):
 
-1. Copy `cinference-qwen38-4090.env.example` to `cinference-qwen38-4090.env`, which git
-   ignores, and set absolute paths.
-2. Adjust `WorkingDirectory` and `EnvironmentFile` in `cinference-qwen38-4090.service`.
+1. Copy `cinference-qwen38-4090.env.example` to `~/.config/cinference/qwen38.env` (mode 600)
+   and set absolute paths. The live configuration stays outside the checkout, so `git pull`
+   can't change or remove it.
+2. Adjust `WorkingDirectory` in `cinference-qwen38-4090.service` if the checkout lives elsewhere.
 3. Install it as a user unit:
 
 ```bash
