@@ -18,7 +18,10 @@ void launch_k8v4_partial(const Tensor& q, CacheInput input, const Tensor& positi
                          Tensor& partial_m, Tensor& partial_l, cudaStream_t stream) {
     constexpr int RowCount             = TokenTile * Geometry::GroupSize;
     constexpr int RowTiles             = (RowCount + 15) / 16;
-    constexpr int Warps                = RowTiles == 3 ? 12 : 8;
+    constexpr int Warps                = RowTiles == 5 ? 20
+                                         : RowTiles > 3  ? 2 * RowTiles
+                                         : RowTiles == 3 ? 12
+                                                         : 8;
     constexpr int KeyBlock             = TokenTile == 1 ? 32 : 64;
     constexpr int MinBlocks            = TokenTile == 1 ? 2 : 1;
     constexpr std::size_t DynamicBytes = 7u * KeyBlock * kCausalHeadDim / 2u;
@@ -146,6 +149,54 @@ void causal_attention_small_t_k8v4_launch_for(const Tensor& q, CacheInput input,
     case 8:
         if constexpr (Geometry::QHeads == 24) {
             dispatch_metadata.template operator()<8>();
+            break;
+        }
+        throw std::invalid_argument("unsupported query-row tile");
+    case 9:
+        if constexpr (Geometry::QHeads == 24) {
+            dispatch_metadata.template operator()<9>();
+            break;
+        }
+        throw std::invalid_argument("unsupported query-row tile");
+    case 10:
+        if constexpr (Geometry::QHeads == 24) {
+            dispatch_metadata.template operator()<10>();
+            break;
+        }
+        throw std::invalid_argument("unsupported query-row tile");
+    case 11:
+        if constexpr (Geometry::QHeads == 24) {
+            dispatch_metadata.template operator()<11>();
+            break;
+        }
+        throw std::invalid_argument("unsupported query-row tile");
+    case 12:
+        if constexpr (Geometry::QHeads == 24) {
+            dispatch_metadata.template operator()<12>();
+            break;
+        }
+        throw std::invalid_argument("unsupported query-row tile");
+    case 13:
+        if constexpr (Geometry::QHeads == 24) {
+            dispatch_metadata.template operator()<13>();
+            break;
+        }
+        throw std::invalid_argument("unsupported query-row tile");
+    case 14:
+        if constexpr (Geometry::QHeads == 24) {
+            dispatch_metadata.template operator()<14>();
+            break;
+        }
+        throw std::invalid_argument("unsupported query-row tile");
+    case 15:
+        if constexpr (Geometry::QHeads == 24) {
+            dispatch_metadata.template operator()<15>();
+            break;
+        }
+        throw std::invalid_argument("unsupported query-row tile");
+    case 16:
+        if constexpr (Geometry::QHeads == 24) {
+            dispatch_metadata.template operator()<16>();
             break;
         }
         throw std::invalid_argument("unsupported query-row tile");

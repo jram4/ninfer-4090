@@ -2371,6 +2371,25 @@ int run_k8v4_cases() {
                             {1, 64, 65, 807u, false, true}, MappingPattern::Fragmented);
     failures += run_a3_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value,
                             {1, 64, 65, 808u, false, true}, MappingPattern::Fragmented);
+    // Single-pass verify widths 9..16 for the 24-head geometry.
+    failures += run_a1_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value, {9, 400, 1024, 830u},
+                            MappingPattern::Fragmented);
+    failures += run_a1_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value,
+                            {11, 2037, 4096, 831u}, MappingPattern::Fragmented);
+    failures += run_a3_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value,
+                            {11, 5000, 8192, 832u}, MappingPattern::Offset);
+    failures += run_a1_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value, {13, 700, 713, 833u},
+                            MappingPattern::Identity);
+    failures += run_a1_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value,
+                            {16, 8176, 8192, 834u}, MappingPattern::Fragmented);
+    failures += run_a3_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value,
+                            {16, 1000, 32768, 835u}, MappingPattern::Fragmented);
+    failures += run_a1_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value,
+                            {11, 640, 1024, 836u, false, true}, MappingPattern::Fragmented);
+    failures += run_a1_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value,
+                            {12, 16372, 16384, 837u}, MappingPattern::Fragmented);
+    failures += run_a3_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value,
+                            {10, 24990, 25000, 838u}, MappingPattern::Fragmented);
     failures += run_a1_case(kGeometries[1], KvCacheStorage::Fp8KeyNvfp4Value, {5, 17, 22, 809u},
                             MappingPattern::Identity);
     failures += run_a1_case(kGeometries[1], KvCacheStorage::Fp8KeyNvfp4Value, {7, 17, 24, 810u},

@@ -217,7 +217,11 @@ std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t 
                                              KvCacheStorage cache_storage,
                                              CausalAttentionExecutionEnvelope envelope,
                                              std::int32_t batch_size) {
-    if (tokens < 1 || tokens > (q_heads == 24 ? 8 : 6) || envelope.min_visible_keys == 0 ||
+    const std::int32_t max_tokens =
+        q_heads != 24                                                               ? 6
+        : cache_storage == KvCacheStorage::Fp8KeyNvfp4Value && batch_size == 1 ? 16
+                                                                                    : 8;
+    if (tokens < 1 || tokens > max_tokens || envelope.min_visible_keys == 0 ||
         envelope.min_visible_keys > envelope.max_visible_keys) {
         throw std::invalid_argument("causal_softmax_attention split capacity: invalid profile");
     }

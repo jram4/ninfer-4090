@@ -367,7 +367,9 @@ CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::i
             }
             if (envelope.max_visible_keys <= prompt_limit) return CausalAttentionRoute::Prompt;
         }
-        return width <= 8 ? CausalAttentionRoute::SmallT : CausalAttentionRoute::ChunkedSmallT;
+        const bool single_pass =
+            width <= 8 || (storage == KvCacheStorage::Fp8KeyNvfp4Value && batch_size == 1);
+        return single_pass ? CausalAttentionRoute::SmallT : CausalAttentionRoute::ChunkedSmallT;
     }
     if (width <= 6) return CausalAttentionRoute::SmallT;
     if (batch_size > 1) return CausalAttentionRoute::ChunkedSmallT;
