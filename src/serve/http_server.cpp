@@ -431,6 +431,27 @@ void HttpServer::register_routes() {
         res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
                         "application/json");
     });
+    // Prometheus text in the llama.cpp counter family that the FNN usage logger scrapes.
+    server_.Get("/metrics", [this](const httplib::Request&, httplib::Response& res) {
+        const ninfer::RuntimeStats stats =
+            service_ != nullptr ? service_->runtime_stats() : ninfer::RuntimeStats{};
+        std::string out;
+        const auto metric = [&](const char* name, const char* type, const char* help,
+                                std::uint64_t value) {
+            out += std::string("# HELP ") + name + " " + help + "\n# TYPE " + name + " " + type +
+                   "\n" + name + " " + std::to_string(value) + "\n";
+        };
+        metric("llamacpp:prompt_tokens_total", "counter", "Prompt tokens evaluated by prefill.",
+               stats.computed_prefill_tokens);
+        metric("llamacpp:tokens_predicted_total", "counter", "Tokens committed by decode.",
+               stats.committed_decode_tokens);
+        metric("llamacpp:decode_rounds_total", "counter", "Decode batch executions.",
+               stats.decode_rounds);
+        metric("llamacpp:requests_processing", "gauge", "Running requests.",
+               stats.running_requests);
+        metric("llamacpp:requests_deferred", "gauge", "Waiting requests.", stats.waiting_requests);
+        res.set_content(out, "text/plain; version=0.0.4");
+    });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
     });

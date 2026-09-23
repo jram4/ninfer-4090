@@ -67,3 +67,4 @@ profiles/
 
 # Machine-local agent automation
 /.codex/
+releases/
