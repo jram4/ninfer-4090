@@ -21,9 +21,9 @@ int q5_a16_conformance() {
     // 560/561/562 for k=6144 (528/529/530 for k=17408), 704/705/706 for the tail=192/193
     // composite-to-wide fallback, and 1024/1025/1026 for a zero, one and two column tail after the
     // second whole wave.
-    constexpr std::array<std::int32_t, 15> kInteriors{1,  2,   3,   8,   24,  40,  56,  64,
-                                                      96, 128, 129, 256, 640, 768, 1024};
-    constexpr std::array<std::int32_t, 5> kK6144RouteStarts{14, 33, 49, 193, 513};
+    constexpr std::array<std::int32_t, 17> kInteriors{1,  2,   3,   8,   9,   11,  24,  40, 56,
+                                                      64, 96,  128, 129, 256, 640, 768, 1024};
+    constexpr std::array<std::int32_t, 5> kK6144RouteStarts{17, 33, 49, 193, 513};
     constexpr std::array<std::int32_t, 6> kK6144GraphTokens{513, 526, 545, 561, 705, 1025};
 
     int failures = 0;

@@ -418,10 +418,23 @@ int main() {
         return 77;
     }
 
+    int device = 0;
+    cudaDeviceProp properties{};
+    if (cudaGetDevice(&device) != cudaSuccess ||
+        cudaGetDeviceProperties(&properties, device) != cudaSuccess) {
+        std::cout << "FAIL: cannot query the CUDA device\n";
+        return 1;
+    }
+    const bool blackwell = properties.major >= 10;
+
     int failures = 0;
     failures += run_q4_q5();
     failures += run_q8();
-    failures += run_nvfp4();
+    if (blackwell) {
+        failures += run_nvfp4();
+    } else {
+        std::cout << "SKIP: native NVFP4 GDN weights require Blackwell\n";
+    }
     failures += run_fp8();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj\n";
     return failures == 0 ? 0 : 1;

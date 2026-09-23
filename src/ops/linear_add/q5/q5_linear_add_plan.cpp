@@ -37,9 +37,12 @@ constexpr std::array<SupportSpec, 2> kSupports{{
     {5120, 17408, 17408},
 }};
 
+// T <= 16 is the speculative verify band. On Ada the single-pass small-T MMA reads each weight
+// byte once for every width in it, while split2 turns FMA-bound from T=8 and the r64 MMA tiles
+// stream weights at a fraction of bandwidth (docs/performance/ada-k10-round-breakdown.md).
 constexpr std::array<RouteSpec, 6> kK6144Routes{{
-    {{1, 13}, Q5LinearAddScheduleId::Split2ExactResidual},
-    {{14, 32}, Q5LinearAddScheduleId::MmaResidualR64C16},
+    {{1, 16}, Q5LinearAddScheduleId::AdaSmallTMmaResidual},
+    {{17, 32}, Q5LinearAddScheduleId::MmaResidualR64C16},
     {{33, 48}, Q5LinearAddScheduleId::MmaResidualR64C24},
     {{49, 192}, Q5LinearAddScheduleId::MmaResidualR64C32S4},
     {{193, 512}, Q5LinearAddScheduleId::MmaResidualR64C128},
@@ -47,7 +50,7 @@ constexpr std::array<RouteSpec, 6> kK6144Routes{{
 }};
 
 constexpr std::array<RouteSpec, 6> kK17408Routes{{
-    {{1, 16}, Q5LinearAddScheduleId::Split2ExactResidual},
+    {{1, 16}, Q5LinearAddScheduleId::AdaSmallTMmaResidual},
     {{17, 32}, Q5LinearAddScheduleId::MmaResidualR64C16},
     {{33, 48}, Q5LinearAddScheduleId::MmaResidualR64C24},
     {{49, 192}, Q5LinearAddScheduleId::MmaResidualR64C32S3},
@@ -114,6 +117,8 @@ void launch_wide_with_narrow_tail(const Tensor& x, const Weight& w, Tensor& resi
 
 const char* q5_linear_add_schedule_name(Q5LinearAddScheduleId schedule) noexcept {
     switch (schedule) {
+    case Q5LinearAddScheduleId::AdaSmallTMmaResidual:
+        return "linear_add.q5.ada.small_t.mma.residual";
     case Q5LinearAddScheduleId::Split2ExactResidual:
         return "linear_add.q5.simt.split2.exact.residual";
     case Q5LinearAddScheduleId::MmaResidualR64C16:
@@ -172,6 +177,9 @@ void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, co
     (void)ws;
 
     switch (plan.schedule) {
+    case Q5LinearAddScheduleId::AdaSmallTMmaResidual:
+        q5_linear_add_ada_small_t_launch(x, w, residual_out, stream);
+        return;
     case Q5LinearAddScheduleId::Split2ExactResidual:
         q5_linear_add_split2_exact_launch(x, w, residual_out, stream);
         return;
