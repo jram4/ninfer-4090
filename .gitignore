@@ -68,3 +68,4 @@ profiles/
 # Machine-local agent automation
 /.codex/
 releases/
+bench_results_*/
