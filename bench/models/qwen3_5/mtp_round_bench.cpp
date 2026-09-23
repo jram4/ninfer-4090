@@ -97,10 +97,12 @@ struct RoundMeasurement {
 };
 
 RoundMeasurement measure_round(qwen::Program& program, ninfer::DeviceContext& device,
-                               qwen::SequenceHandle sequence, std::uint32_t draft_tokens) {
+                               qwen::SequenceHandle sequence, std::uint32_t& tokens_remaining) {
+    // The whole remaining request budget is passed so that a fully accepted round still leaves
+    // room for the next proposal; a K+1 per-round budget forces a fallback step after it.
     const std::array<qwen::SequenceHandle, 1> sequences{sequence};
     const std::array<ninfer::runtime::RoundBudget, 1> budgets{
-        ninfer::runtime::RoundBudget{.generated_tokens_remaining = draft_tokens + 1}};
+        ninfer::runtime::RoundBudget{.generated_tokens_remaining = tokens_remaining}};
     ninfer::CudaEventTimer timer(device);
     timer.start();
     auto pending                 = program.decode(sequences, budgets);
@@ -111,6 +113,7 @@ RoundMeasurement measure_round(qwen::Program& program, ninfer::DeviceContext& de
         ninfer::runtime::CommitDecision{.accepted_tokens = licensed}};
     (void)program.commit(std::move(pending), decisions);
     const float milliseconds = timer.stop_ms();
+    tokens_remaining -= licensed;
     return RoundMeasurement{.milliseconds = milliseconds, .licensed_tokens = licensed};
 }
 
@@ -188,15 +191,16 @@ int run(const Options& options) {
     const auto active_sequence = started.sequence;
 
     constexpr std::uint64_t rounds_before = 0;
+    std::uint32_t tokens_remaining        = execution.requested_output_tokens - 1;
     for (int iteration = 0; iteration < options.warmup; ++iteration) {
-        (void)measure_round(*program, device, active_sequence, options.draft_tokens);
+        (void)measure_round(*program, device, active_sequence, tokens_remaining);
     }
 
     std::vector<RoundMeasurement> measurements;
     measurements.reserve(static_cast<std::size_t>(options.repetitions));
     for (int iteration = 0; iteration < options.repetitions; ++iteration) {
         measurements.push_back(
-            measure_round(*program, device, active_sequence, options.draft_tokens));
+            measure_round(*program, device, active_sequence, tokens_remaining));
     }
     const auto aborted = program->abort(active_sequence);
     if (aborted.status != ninfer::runtime::ConsumeStatus::Consumed) {
@@ -204,7 +208,11 @@ int run(const Options& options) {
     }
     const ninfer::SpeculativeStats stats = aborted.speculative;
     if (stats.rounds - rounds_before != measured_rounds || stats.fallback_steps != 0) {
-        throw std::runtime_error("benchmark did not stay on the native MTP proposal/verify path");
+        throw std::runtime_error(
+            "benchmark did not stay on the native MTP proposal/verify path: rounds=" +
+            std::to_string(stats.rounds - rounds_before) + " expected=" +
+            std::to_string(measured_rounds) + " fallback_steps=" +
+            std::to_string(stats.fallback_steps));
     }
 
     std::vector<float> milliseconds;
