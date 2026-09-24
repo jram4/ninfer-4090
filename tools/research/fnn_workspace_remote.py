@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime
+import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -21,6 +23,14 @@ def run(argv: list[str], *, timeout: int = 15, check: bool = True) -> subprocess
         detail = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(f"{argv[0]} failed ({result.returncode}): {detail}")
     return result
+
+
+def sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def normalized(path: str) -> str:
@@ -106,22 +116,41 @@ def git_observation(path: str) -> dict[str, Any]:
 
 
 def verify_directory_flock(path: str) -> None:
-    result = run(["flock", "--exclusive", "--nonblock", path, "/usr/bin/true"], check=False)
-    if result.returncode:
-        detail = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(f"shared directory flock is unavailable: {detail}")
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Contention proves that the filesystem supports the lock.
+                return
+            except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EAGAIN):
+                    return
+                raise
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise RuntimeError(f"shared directory flock is unavailable: {exc}") from exc
 
 
 def base_metadata(request: dict[str, Any]) -> dict[str, Any]:
     verify_remote_identity(request)
     artifact = request["artifact"]
-    artifact_stat = os.stat(artifact["path"])
+    reject_symlink_components(artifact["path"])
+    artifact_stat = os.lstat(artifact["path"])
     if artifact_stat.st_size != artifact["size_bytes"]:
         raise RuntimeError("artifact size differs from the recorded E0001-LW04 identity")
     if not stat.S_ISREG(artifact_stat.st_mode) or artifact_stat.st_uid != os.getuid():
         raise RuntimeError("artifact is not a user-owned regular file")
 
     selected_path = "/home/aramirezfamily/josh/ninfer-4090"
+    reject_symlink_components(selected_path)
     selected = git_observation(selected_path)
     revision = request.get("revision")
     if revision:
@@ -187,6 +216,7 @@ def ensure_identity_root(request: dict[str, Any]) -> tuple[str, dict[str, str]]:
     identity = request["identity"]
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9._-]{0,47})-[0-9a-f]{12}-(?:clean|[0-9a-f]{12})", identity):
         raise RuntimeError("invalid generated identity")
+    require_private_dir(request["research_root"], os.getuid())
     paths = request["paths"]
     root = guard_path(paths["root"], request["research_root"], request["protected_paths"])
     expected_root = f"{request['research_root']}/ninfer-{identity}"
@@ -232,16 +262,57 @@ def prepare(request: dict[str, Any]) -> None:
     print(json.dumps({"identity": request["identity"], "root": root, "remote": observed, "prepared": True}))
 
 
-def checked_file(path: str, expected_sha256: str, uid: int) -> dict[str, Any]:
-    info = os.lstat(path)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
-        raise RuntimeError(f"input is not a user-owned regular file: {path}")
-    os.chmod(path, 0o600)
-    info = os.stat(path)
-    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-    if digest != expected_sha256:
-        raise RuntimeError(f"input checksum mismatch: {path}")
-    return {"path": path, "sha256": digest, "size_bytes": info.st_size}
+def checked_file(
+    path: str,
+    expected_name: str,
+    expected_sha256: str,
+    uid: int,
+    input_directory: str,
+    protected_paths: list[str],
+) -> dict[str, Any]:
+    path = guard_path(path, input_directory, protected_paths)
+    if path != os.path.join(normalized(input_directory), expected_name):
+        raise RuntimeError(f"unexpected input file path: {path}")
+    if not isinstance(expected_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise RuntimeError(f"invalid expected SHA-256 for input: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RuntimeError(f"input cannot be opened safely: {path}: {exc}") from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
+            raise RuntimeError(f"input is not a user-owned regular file: {path}")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        sha256 = digest.hexdigest()
+        if sha256 != expected_sha256:
+            raise RuntimeError(f"input checksum mismatch: {path}")
+        os.fchmod(descriptor, 0o600)
+        return {"path": path, "sha256": sha256, "size_bytes": info.st_size}
+    finally:
+        os.close(descriptor)
+
+
+def require_identity_marker(root: str, identity: str) -> str:
+    marker = str(Path(root) / ".ninfer-research-identity")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(marker, flags)
+    except OSError as exc:
+        raise RuntimeError(f"research identity marker cannot be opened safely: {exc}") from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            raise RuntimeError("research identity marker is not a private user-owned regular file")
+        marker_contents = os.read(descriptor, 128).decode("utf-8")
+    finally:
+        os.close(descriptor)
+    if marker_contents != identity + "\n":
+        raise RuntimeError("research identity marker mismatch")
+    return marker
 
 
 def restrict_tree_permissions(path: str) -> None:
@@ -261,12 +332,17 @@ def finalize(request: dict[str, Any]) -> None:
     require_private_dir(root, os.getuid())
     for path in (paths["checkout"], paths["build"], paths["results"], paths["input"]):
         require_private_dir(path, os.getuid())
-    marker = Path(root) / ".ninfer-research-identity"
-    if marker.read_text(encoding="utf-8").strip() != request["identity"]:
-        raise RuntimeError("research identity marker mismatch")
+    require_identity_marker(root, request["identity"])
 
     os.umask(0o077)
-    bundle = checked_file(request["bundle_remote_path"], request["bundle_sha256"], os.getuid())
+    bundle = checked_file(
+        request["bundle_remote_path"],
+        "source.bundle",
+        request["bundle_sha256"],
+        os.getuid(),
+        paths["input"],
+        request["protected_paths"],
+    )
     source_path = paths["checkout"]
     run(["git", "init", "--quiet", source_path])
     run(["git", "-C", source_path, "fetch", "--quiet", request["bundle_remote_path"], request["export_ref"]])
@@ -276,7 +352,14 @@ def finalize(request: dict[str, Any]) -> None:
 
     patch_meta = None
     if request["patch_remote_path"]:
-        patch_meta = checked_file(request["patch_remote_path"], request["patch_sha256"], os.getuid())
+        patch_meta = checked_file(
+            request["patch_remote_path"],
+            "source.patch",
+            request["patch_sha256"],
+            os.getuid(),
+            paths["input"],
+            request["protected_paths"],
+        )
         run(["git", "-C", source_path, "apply", "--check", "--", request["patch_remote_path"]])
         run(["git", "-C", source_path, "apply", "--", request["patch_remote_path"]])
     elif request["patch_sha256"] is not None:
@@ -290,7 +373,9 @@ def finalize(request: dict[str, Any]) -> None:
     source_status_count = len(run(["git", "-C", source_path, "status", "--porcelain=v1"]).stdout.splitlines())
 
     metadata = base_metadata(request)
-    if metadata["selected_checkout"] != request["source_repo_before"]:
+    selected_checkout_before = request["source_repo_before"]
+    selected_checkout_after = metadata["selected_checkout"]
+    if selected_checkout_after != selected_checkout_before:
         raise RuntimeError("selected production checkout metadata changed during setup")
     metadata.update({
         "schema_version": 1,
@@ -320,7 +405,9 @@ def finalize(request: dict[str, Any]) -> None:
             "configuration": None,
             "command": None,
         },
-        "selected_checkout_unchanged": True,
+        "selected_checkout_before": selected_checkout_before,
+        "selected_checkout_after": selected_checkout_after,
+        "selected_checkout_unchanged": selected_checkout_before == selected_checkout_after,
         "gpu_serialization": {
             "lock_path": request["research_root"],
             "mechanism": "blocking flock exclusive lock on the preexisting owner-only .local/share directory; no lock file created",
@@ -346,9 +433,7 @@ def lock_plan(request: dict[str, Any]) -> None:
     verify_remote_identity(request)
     root, paths = ensure_identity_root(request)
     require_private_dir(root, os.getuid())
-    marker = Path(root) / ".ninfer-research-identity"
-    if marker.read_text(encoding="utf-8").strip() != request["identity"]:
-        raise RuntimeError("research identity marker mismatch")
+    require_identity_marker(root, request["identity"])
     print(json.dumps({
         "identity": request["identity"],
         "checkout": paths["checkout"],
@@ -366,9 +451,7 @@ def gpu_lock(request: dict[str, Any]) -> None:
     require_private_dir(root, os.getuid())
     for path in (paths["checkout"], paths["build"], paths["results"]):
         require_private_dir(path, os.getuid())
-    marker = Path(root) / ".ninfer-research-identity"
-    if marker.read_text(encoding="utf-8").strip() != request["identity"]:
-        raise RuntimeError("research identity marker mismatch")
+    require_identity_marker(root, request["identity"])
     lock_path = request["research_root"]
     if not shutil.which("flock"):
         raise RuntimeError("flock is unavailable")
@@ -400,9 +483,7 @@ def cleanup(request: dict[str, Any]) -> None:
         print(json.dumps({"identity": request["identity"], "root": root, "exists": False, "removed": False}))
         return
     require_private_dir(root, os.getuid())
-    marker = Path(root) / ".ninfer-research-identity"
-    if not marker.is_file() or marker.read_text(encoding="utf-8").strip() != request["identity"]:
-        raise RuntimeError("refusing cleanup without a matching identity marker")
+    require_identity_marker(root, request["identity"])
     root_resolved = str(Path(root).resolve(strict=True))
     if root_resolved != root or any(paths_overlap(root, path) for path in request["protected_paths"]):
         raise RuntimeError("refusing cleanup of an unsafe path")
@@ -419,9 +500,7 @@ def record_build(request: dict[str, Any]) -> None:
     require_private_dir(root, os.getuid())
     require_private_dir(paths["build"], os.getuid())
     require_private_dir(paths["results"], os.getuid())
-    marker = Path(root) / ".ninfer-research-identity"
-    if marker.read_text(encoding="utf-8").strip() != request["identity"]:
-        raise RuntimeError("research identity marker mismatch")
+    require_identity_marker(root, request["identity"])
 
     binary_path = guard_path(request["binary_path"], paths["build"], request["protected_paths"])
     binary_stat = os.stat(binary_path)
@@ -470,10 +549,10 @@ def record_build(request: dict[str, Any]) -> None:
         "state": "built",
         "directory": paths["build"],
         "binary": binary_path,
-        "binary_sha256": hashlib.sha256(Path(binary_path).read_bytes()).hexdigest(),
+        "binary_sha256": sha256_file(binary_path),
         "binary_size_bytes": binary_stat.st_size,
         "cmake_cache": cache_path,
-        "cmake_cache_sha256": hashlib.sha256(Path(cache_path).read_bytes()).hexdigest(),
+        "cmake_cache_sha256": sha256_file(cache_path),
         "configuration": config,
         "recorded_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }

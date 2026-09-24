@@ -142,8 +142,16 @@ def patch_info(patch_path: str | None) -> tuple[Path | None, str | None]:
     path = Path(patch_path).expanduser().resolve(strict=True)
     if not path.is_file():
         raise ValueError("patch must be a regular file")
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = sha256_file(path)
     return path, digest
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def make_bundle(repo: Path, revision: str, temp_root: Path) -> tuple[Path, str, str]:
@@ -155,7 +163,7 @@ def make_bundle(repo: Path, revision: str, temp_root: Path) -> tuple[Path, str, 
     _run(["git", "-C", str(export_repo), "update-ref", export_ref, revision])
     _run(["git", "-C", str(export_repo), "bundle", "create", str(bundle_path), export_ref])
     _run(["git", "bundle", "verify", str(bundle_path)])
-    digest = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+    digest = sha256_file(bundle_path)
     return bundle_path, digest, export_ref
 
 

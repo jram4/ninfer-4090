@@ -48,10 +48,13 @@ The checkout, empty build directory, and result root live under one mode-700 pat
 ```
 
 The worker root and its checkout/build/input/result directories are mode 700, and the provenance
-file is mode 600. The manifest records the local revision, patch and bundle hashes, branch state,
-checkout/build/result paths, source checkout state before and after setup, Git/CMake/CUDA/C++/Python
-versions, GPU UUID/driver/memory, and the explicit model artifact path/hash/size. The artifact
-hash is carried forward from the
+file is mode 600. Before using transferred inputs, the remote helper requires the bundle and
+optional patch to be the exact named files inside that worker's `input/` directory, rejects
+symlink components, verifies ownership and SHA-256, then restricts their modes. Identity markers
+are opened without following symlinks. The manifest records the local revision, patch and bundle
+hashes, branch state, checkout/build/result paths, the selected checkout observation before and
+after setup, Git/CMake/CUDA/C++/Python versions, GPU UUID/driver/memory, and the explicit model
+artifact path/hash/size. The artifact hash is carried forward from the
 E0001-LW04 preflight and its size is checked again; this setup does not reread the 18 GB model.
 The build directory is recorded as `not-configured`; this workflow does not build or run anything.
 After an authorized build, record its binary and CMake configuration without rerunning it:
@@ -74,6 +77,9 @@ It uses a blocking exclusive `flock` on the preexisting owner-only
 `/home/aramirezfamily/.local/share` directory. All workers use the same inode, so a waiter sleeps
 inside the kernel lock instead of polling; no lock file or shared directory is created. Pass
 explicit build and report paths under the exported worker paths.
+
+The read-only plan probe checks filesystem lock support directly. A lock already held by another
+worker counts as supported and does not make planning fail.
 
 ```sh
 python3 tools/research/fnn_workspace.py lock-plan --identity e0002-lw04-70ebb1290dc7-clean
