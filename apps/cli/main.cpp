@@ -1,4 +1,5 @@
 #include "options.h"
+#include "product/decode_research_log.h"
 #include "product/logging/logging.h"
 #include "product/logging/pretty_format.h"
 #include "product/logging/startup_log.h"
@@ -9,6 +10,8 @@
 
 #include <cstdint>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -283,6 +286,27 @@ int main(int argc, char** argv) {
         engine_options.context_cache.host_state_slots       = 0;
         engine_options.context_cache.host_kv_capacity_bytes = 0;
         engine_options.startup_observer                     = startup_log.observer();
+
+        std::ofstream decode_research_log;
+        if (!cli.decode_research_jsonl.empty()) {
+            std::error_code filesystem_error;
+            if (std::filesystem::exists(cli.decode_research_jsonl, filesystem_error) &&
+                !filesystem_error &&
+                std::filesystem::equivalent(cli.artifact_path, cli.decode_research_jsonl,
+                                            filesystem_error) &&
+                !filesystem_error) {
+                throw std::invalid_argument(
+                    "--decode-research-jsonl must not name the model artifact");
+            }
+            decode_research_log.open(cli.decode_research_jsonl,
+                                     std::ios::out | std::ios::app);
+            if (!decode_research_log) {
+                throw std::runtime_error("could not open decode research JSONL output");
+            }
+            engine_options.decode_research_observer.callback = [&](const auto& event) {
+                ninfer::product::write_decode_research_event(decode_research_log, event);
+            };
+        }
 
         ninfer::Engine engine(std::move(engine_options));
         startup_log.engine_ready(engine.load_summary());

@@ -804,6 +804,8 @@ struct CommitRowResult {
 
 struct CommitResult {
     std::array<CommitRowResult, kMaximumConcurrency> rows{};
+    std::optional<std::array<runtime::DecodeRoundCommitMetadata, kMaximumConcurrency>>
+        decode_round_rows;
     // A prompt-frontier capture becomes valid only after the generated Begin token is committed.
     // Keeping the move-only capability row-aligned avoids exposing provisional prompt state.
     std::array<std::optional<CaptureOffer>, kMaximumConcurrency> captures{};

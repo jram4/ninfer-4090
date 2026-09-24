@@ -11,6 +11,7 @@ ninfer_internal_includes(ninfer_product_prompt_input)
 target_link_libraries(ninfer_product_prompt_input PRIVATE ninfer_media_acquire ninfer::json)
 
 add_library(ninfer_product_logging STATIC
+  decode_research_log.cpp
   logging/logging.cpp
   logging/pretty_format.cpp
   logging/startup_log.cpp

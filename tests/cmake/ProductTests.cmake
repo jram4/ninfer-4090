@@ -10,6 +10,10 @@ ninfer_add_test(ninfer_pretty_logging_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_pretty_logging.cpp"
   LIBRARIES ninfer_product_logging)
 
+ninfer_add_test(ninfer_decode_research_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_decode_research.cpp"
+  LIBRARIES ninfer_product_logging)
+
 ninfer_add_test(ninfer_perplexity_evaluation_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_perplexity_evaluation.cpp"
           ${PROJECT_SOURCE_DIR}/apps/perplexity/evaluation.cpp
@@ -23,6 +27,11 @@ ninfer_add_test(ninfer_cli_options_test
   LIBRARIES ninfer_runtime_support ninfer_product_logging)
 
 target_include_directories(ninfer_cli_options_test PRIVATE ${PROJECT_SOURCE_DIR}/apps/cli)
+
+add_test(NAME ninfer_decode_research_analysis_test
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/../test_decode_research_analysis.py
+          ${PROJECT_SOURCE_DIR}/tools/analyze_decode_research.py)
 
 ninfer_add_test(ninfer_openai_schema_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_openai_schema.cpp"

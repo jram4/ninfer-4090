@@ -16,6 +16,7 @@ struct Options {
 
     std::filesystem::path artifact_path;
     std::filesystem::path chat_template_path;
+    std::filesystem::path decode_research_jsonl;
     std::string prompt;
     std::filesystem::path messages_path;
 

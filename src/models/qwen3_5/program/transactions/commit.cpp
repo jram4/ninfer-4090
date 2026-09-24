@@ -439,6 +439,8 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
     std::array<GenerationTimings, kMaximumConcurrency> timings{};
     std::array<SpeculativeStats, kMaximumConcurrency> speculative{};
     std::array<PendingKind, kMaximumConcurrency> pending_kinds{};
+    std::optional<std::array<runtime::DecodeRoundCommitMetadata, kMaximumConcurrency>>
+        decode_round_rows;
     const auto release_members = [&]() noexcept {
         std::array<std::uint32_t, kMaximumConcurrency> failed_lanes{};
         std::size_t failed_count = 0;
@@ -485,6 +487,12 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
             terminal[row]                = decision.terminal ? 1U : 0U;
             cancelled[row]               = decision.cancelled ? 1U : 0U;
             prefix_execution_splits[row] = decision.prefix_execution_split_after;
+            if (observation == runtime::CommitObservation::DecodeResearchRows) {
+                if (!decode_round_rows) { decode_round_rows.emplace(); }
+                (*decode_round_rows)[row] = runtime::make_decode_round_commit_metadata(
+                    candidate.base_E, candidate.draft_extent, candidate.accepted_prefix,
+                    candidate.produced, decision.accepted_tokens);
+            }
             if (decision.cancelled) {
                 timings[row]     = requests[lane].timings;
                 speculative[row] = std::move(requests[lane].speculative_stats);
@@ -505,6 +513,7 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
 
         CommitResult out;
         out.row_count          = row_count;
+        out.decode_round_rows = std::move(decode_round_rows);
         bool released_resource = false;
         for (std::size_t row = 0; row < row_count; ++row) {
             if (decisions[row].cancelled) {

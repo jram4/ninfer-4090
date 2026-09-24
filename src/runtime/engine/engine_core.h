@@ -7,10 +7,11 @@
 #include "ninfer/types.h"
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
-#include "runtime/engine/request_record.h"
 #include "runtime/engine/context_cache/resource_manager.h"
-#include "runtime/engine/scheduler.h"
+#include "runtime/engine/decode_research.h"
 #include "runtime/engine/generation_budget.h"
+#include "runtime/engine/request_record.h"
+#include "runtime/engine/scheduler.h"
 
 #include <algorithm>
 #include <array>
@@ -62,6 +63,11 @@ public:
     using ResourceInspection = typename ResourceManagement::Inspection;
     using Clock              = std::chrono::steady_clock;
 
+    [[nodiscard]] static std::uint64_t new_engine_session_id(bool enabled) noexcept {
+        if (!enabled) { return 0; }
+        return static_cast<std::uint64_t>(Clock::now().time_since_epoch().count());
+    }
+
     EngineCore(Instance& instance, DeviceContext& device, const EngineOptions& options,
                ContextMachineCostModel context_cost)
         : instance_(instance), device_(device), max_context_(options.max_context),
@@ -73,7 +79,12 @@ public:
                      options.context_cache.max_shared_prefixes.value(),
                      options.context_cache.enabled,
                      options.context_cache.max_long_anchors_per_continuation.value_or(0),
-                     std::move(context_cost)) {
+                     std::move(context_cost)),
+          decode_research_observer_(options.decode_research_observer),
+          speculative_backend_(options.speculative.backend),
+          draft_window_(options.speculative.draft_tokens), use_cuda_graph_(options.use_cuda_graph),
+          engine_session_id_(new_engine_session_id(
+              static_cast<bool>(decode_research_observer_.callback))) {
         if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
             throw std::invalid_argument("Engine core bounds are invalid");
@@ -1041,9 +1052,13 @@ private:
 
     void commit_pending(PendingBatch&& pending, std::span<const std::uint32_t> lane_indices,
                         bool decode_round,
-                        const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start) {
+                        const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start,
+                        Clock::time_point decode_round_started = {}) {
         EnginePhaseScope phase(*this, EngineHostPhase::CommitOutput);
         const std::size_t row_count = lane_indices.size();
+        const bool collect_decode_research = decode_round &&
+                                             static_cast<bool>(
+                                                 decode_research_observer_.callback);
         if (row_count == 0 || row_count != pending.row_count() || pending.row_stride() == 0 ||
             (!pending.row_counts().empty() && pending.row_counts().size() != row_count) ||
             pending.tokens().size() < static_cast<std::size_t>(pending.row_stride()) * row_count) {
@@ -1067,6 +1082,9 @@ private:
         std::array<std::shared_ptr<Request>, kMaximumConcurrency> terminal_requests{};
         std::array<std::uint32_t, kMaximumConcurrency> terminal_lanes{};
         std::array<FinishReason, kMaximumConcurrency> terminal_reasons{};
+        // Research identity snapshots are initialized and consumed only when the observer is on.
+        std::array<std::uint64_t, kMaximumConcurrency> research_request_ids;
+        std::array<std::uint64_t, kMaximumConcurrency> research_request_rounds;
         std::size_t terminal_count = 0;
         for (std::size_t row = 0; row < row_count; ++row) {
             lanes[row] = LaneId{lane_indices[row]};
@@ -1090,6 +1108,10 @@ private:
                     throw std::logic_error("pending row has no active Engine request");
                 }
                 if (decode_round) { ++request->host_timing.decode_rounds; }
+                if (collect_decode_research) {
+                    research_request_ids[row]     = request->id;
+                    research_request_rounds[row] = request->host_timing.decode_rounds;
+                }
                 cancelled[row] = cancelled_at_unit_start[lane];
                 const std::int32_t raw_count =
                     pending.row_counts().empty() ? 1 : pending.row_counts()[row];
@@ -1162,7 +1184,9 @@ private:
             ProgramCallScope program_call(*this);
             auto committed = instance_.program->commit(
                 std::move(pending), std::span<const CommitDecision>(decisions.data(), row_count),
-                CommitObservation::ReleasedRowsOnly, &program_call.failed_timing());
+                collect_decode_research ? CommitObservation::DecodeResearchRows
+                                        : CommitObservation::ReleasedRowsOnly,
+                &program_call.failed_timing());
             program_call.finish(committed.timing);
             committed_storage.emplace(std::move(committed));
             phase.resume_range();
@@ -1277,6 +1301,42 @@ private:
         for (std::size_t index = 0; index < terminal_count; ++index) {
             complete_success(terminal_requests[index], terminal_reasons[index]);
             remove_completed_slot(terminal_lanes[index]);
+        }
+        if (collect_decode_research) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                Clock::now() - decode_round_started);
+            const std::uint64_t round_elapsed_ns =
+                elapsed.count() > 0 ? static_cast<std::uint64_t>(elapsed.count()) : 0;
+            for (std::size_t row = 0; row < row_count; ++row) {
+                if (!committed.decode_round_rows) { continue; }
+                const auto& facts = (*committed.decode_round_rows)[row];
+                if (!facts.available) { continue; }
+                const DecodeResearchEvent event = make_decode_research_event(
+                    DecodeResearchEventInput{
+                        .engine_session_id   = engine_session_id_,
+                        .engine_round_id     = cumulative_stats_.decode_rounds,
+                        .request_id          = research_request_ids[row],
+                        .request_round_index = research_request_rounds[row],
+                        .batch_size          = static_cast<std::uint32_t>(row_count),
+                        .backend             = speculative_backend_,
+                        .draft_window        = draft_window_,
+                        .use_cuda_graph      = use_cuda_graph_,
+                        .context_frontier    = facts.context_frontier,
+                        .draft_extent        = facts.draft_extent,
+                        .accepted_prefix     = facts.accepted_prefix,
+                        .licensed_count      = facts.licensed_count,
+                        .committed_count     = facts.committed_count,
+                        .round_elapsed_ns    = round_elapsed_ns,
+                        .terminal            = decisions[row].terminal,
+                        .cancelled           = decisions[row].cancelled,
+                        .finish_reason       = finish_reasons[row],
+                    });
+                try {
+                    decode_research_observer_.callback(event);
+                } catch (...) {
+                    // Research output is best-effort and cannot alter the committed result.
+                }
+            }
         }
     }
 
@@ -1807,11 +1867,16 @@ private:
                           const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start) {
         nvtx::ScopedRange decode_range(nvtx::Name::Decode, nvtx::Category::Decode,
                                        static_cast<std::uint64_t>(membership.size));
+        const bool collect_decode_research =
+            static_cast<bool>(decode_research_observer_.callback);
+        const Clock::time_point decode_round_started =
+            collect_decode_research ? Clock::now() : Clock::time_point{};
         ProgramCallScope program_call(*this);
         auto pending = instance_.program->decode(
             membership.sequence_span(), membership.budget_span(), &program_call.failed_timing());
         program_call.finish(pending.execution_timing());
-        commit_pending(std::move(pending), membership.lane_span(), true, cancelled_at_unit_start);
+        commit_pending(std::move(pending), membership.lane_span(), true, cancelled_at_unit_start,
+                       decode_round_started);
         publish_runtime_stats();
     }
 
@@ -2044,6 +2109,11 @@ private:
     const std::size_t max_outstanding_;
     const std::chrono::milliseconds pending_timeout_;
     ResourceManagement resources_;
+    const DecodeResearchObserver decode_research_observer_;
+    const SpeculativeBackend speculative_backend_;
+    const std::uint32_t draft_window_;
+    const bool use_cuda_graph_;
+    const std::uint64_t engine_session_id_;
 
     mutable std::mutex execution_mutex_;
     mutable std::mutex queue_mutex_;

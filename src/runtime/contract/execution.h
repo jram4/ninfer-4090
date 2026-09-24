@@ -1,5 +1,6 @@
 #pragma once
 
+#include "runtime/contract/decode_research.h"
 #include "runtime/contract/request.h"
 #include "runtime/contract/timing.h"
 #include <compare>
@@ -29,6 +30,7 @@ enum class CommitDisposition : std::uint8_t {
 // Direct diagnostic callers may temporarily request cumulative snapshots for every row.
 enum class CommitObservation : std::uint8_t {
     ReleasedRowsOnly,
+    DecodeResearchRows,
     AllRows,
 };
 

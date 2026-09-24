@@ -69,6 +69,35 @@ rejected rather than truncating the suffix. Normal output sends the inserted gui
 reasoning. `--print-token-ids` includes the inserted IDs, while `--raw-output` preserves the raw
 control representation.
 
+## Decode research events
+
+`--decode-research-jsonl FILE` opts into content-free, per-decode-row events. The option is disabled
+by default. Events contain an Engine-local request ordinal, per-request and engine round numbers,
+backend/window/graph settings, pre-round context frontier, actual draft extent, verifier-accepted
+draft prefix, Engine-committed count, terminal/truncation state, and round elapsed nanoseconds. A
+compact batch writes one row per request with the same engine round ID and elapsed time. No prompt,
+generated text, token IDs, or client identity is recorded. The file is appended to, so keep records
+from separate source revisions or configurations in separately labeled files.
+The first token produced by prefill is not a decode-round event.
+
+The measured round time begins before Program decode and ends after Program commit, Engine output
+commit, and terminal finalization. Research event serialization is excluded. `truncated` means
+Engine committed fewer tokens than Program licensed, except for cancellation; `accepted_prefix` is
+the verifier's accepted draft prefix, while `committed_draft_prefix` is the part of that prefix
+committed by Engine.
+
+Summarize a file with ratio-of-sums throughput and extent-conditioned survival/marginal-width
+quantities:
+
+```bash
+python3.11 tools/analyze_decode_research.py runs/decode.jsonl
+```
+
+The analyzer counts each shared compact-batch round time once when calculating
+`sum(committed_count) / sum(round_elapsed_ns)`. Per-position survival conditions on rows whose
+actual draft extent reached that position, so short terminal extents do not depress the survival
+denominator.
+
 For example, this allows at most 512 model-origin thinking tokens while retaining enough total
 output capacity for the inserted suffix and the answer:
 
@@ -219,6 +248,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
+| `--decode-research-jsonl FILE` | append content-free per-round acceptance/cost events | disabled |
 | `--chat-template FILE` | use a local Jinja template | artifact template |
 | `--no-thinking` | disable thinking | template default |
 | `--thinking-budget N` | positive model-origin thinking-token cap; omitted means unlimited | unset |

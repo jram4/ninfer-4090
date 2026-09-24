@@ -279,6 +279,10 @@ struct PendingCandidate {
     std::uint32_t base_S        = 0;
     std::uint32_t prompt_tokens = 0;
     std::uint32_t produced      = 0;
+    // Proposal extent and verifier-accepted draft prefix for this pending decode row. Ordinary
+    // and fallback rows keep both at zero. These are snapshots because commit consumes pending.
+    std::uint32_t draft_extent     = 0;
+    std::uint32_t accepted_prefix = 0;
 };
 
 enum class Lifecycle : std::uint8_t {

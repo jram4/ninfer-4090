@@ -78,6 +78,47 @@ enum class SpeculativeBackend : std::uint8_t {
     DFlash2,
 };
 
+enum class FinishReason : std::uint8_t {
+    None,
+    OutputLimit,
+    ContextCapacity,
+    StopToken,
+    StopString,
+    Cancelled,
+};
+
+// Opt-in, content-free observation of one committed decode row. Request identifiers are local
+// Engine ordinals; no prompt, generated text, or token IDs are included. In a compact batch all
+// rows share engine_round_id and round_elapsed_ns.
+struct DecodeResearchEvent {
+    std::uint64_t engine_session_id       = 0;
+    std::uint64_t engine_round_id         = 0;
+    std::uint64_t request_id              = 0;
+    std::uint64_t request_round_index     = 0;
+    std::uint32_t batch_size              = 0;
+    SpeculativeBackend backend            = SpeculativeBackend::None;
+    std::uint32_t draft_window            = 0;
+    bool use_cuda_graph                   = true;
+    std::uint32_t context_frontier        = 0;
+    std::uint32_t draft_extent            = 0;
+    std::uint32_t accepted_prefix         = 0;
+    std::uint32_t committed_draft_prefix  = 0;
+    std::uint32_t licensed_count          = 0;
+    std::uint32_t committed_count         = 0;
+    std::uint64_t round_elapsed_ns        = 0;
+    bool terminal                         = false;
+    // True when Engine committed fewer tokens than Program licensed, except for cancellation.
+    bool truncated                        = false;
+    bool cancelled                        = false;
+    FinishReason finish_reason            = FinishReason::None;
+};
+
+struct DecodeResearchObserver {
+    // Called synchronously on the Engine worker after the decode round commits. Exceptions are
+    // ignored so an optional research sink cannot change inference results.
+    std::function<void(const DecodeResearchEvent&)> callback;
+};
+
 struct SpeculativeOptions {
     SpeculativeBackend backend = SpeculativeBackend::None;
     // Startup-fixed K: MTP 1..10; DFlash and DFlash2 1..15 (query width K+1).
@@ -173,6 +214,7 @@ struct EngineOptions {
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;
+    DecodeResearchObserver decode_research_observer;
 };
 
 enum class SamplingMode : std::uint8_t {
@@ -554,15 +596,6 @@ struct MediaCacheSummary {
     std::uint64_t singleflight_waits = 0;
     std::uint64_t evictions          = 0;
     std::uint64_t oversize_bypasses  = 0;
-};
-
-enum class FinishReason : std::uint8_t {
-    None,
-    OutputLimit,
-    ContextCapacity,
-    StopToken,
-    StopString,
-    Cancelled,
 };
 
 struct OutputDelta {

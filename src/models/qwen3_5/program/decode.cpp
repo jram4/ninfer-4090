@@ -557,11 +557,13 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                 }
             }
             request.pending = PendingCandidate{
-                .kind          = PendingKind::Speculative,
-                .base_E        = base_E,
-                .base_S        = base_S,
-                .prompt_tokens = 0,
-                .produced      = static_cast<std::uint32_t>(count_i),
+                .kind             = PendingKind::Speculative,
+                .base_E           = base_E,
+                .base_S           = base_S,
+                .prompt_tokens    = 0,
+                .produced         = static_cast<std::uint32_t>(count_i),
+                .draft_extent     = pcur,
+                .accepted_prefix = static_cast<std::uint32_t>(accepted_i),
             };
             request.lifecycle = Lifecycle::Pending;
             request.timings.decode_seconds += seconds;
@@ -750,12 +752,14 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 }
             }
             sequence.dflash_context_frontier = base_E;
-            request.pending                  = PendingCandidate{
-                                 .kind          = PendingKind::Speculative,
-                                 .base_E        = base_E,
-                                 .base_S        = base_S,
-                                 .prompt_tokens = 0,
-                                 .produced      = static_cast<std::uint32_t>(count_i),
+            request.pending = PendingCandidate{
+                .kind            = PendingKind::Speculative,
+                .base_E          = base_E,
+                .base_S          = base_S,
+                .prompt_tokens   = 0,
+                .produced        = static_cast<std::uint32_t>(count_i),
+                .draft_extent    = extent,
+                .accepted_prefix = static_cast<std::uint32_t>(accepted_i),
             };
             request.lifecycle = Lifecycle::Pending;
             request.timings.decode_seconds += seconds;

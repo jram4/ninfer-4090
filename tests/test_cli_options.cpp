@@ -99,6 +99,18 @@ int main() {
                                        "--log-level", "verbose"});
                       }),
                       "CLI accepted an unknown log level");
+    const ninfer::cli::Options decode_research = parse(
+        {"ninfer-cli", "model.ninfer", "--prompt", "hello", "--decode-research-jsonl",
+         "decode.jsonl"});
+    failures += check(decode_research.decode_research_jsonl == "decode.jsonl",
+                      "CLI did not preserve the opted-in decode research output path");
+    failures += check(help.find("--decode-research-jsonl") != std::string::npos,
+                      "CLI help omits decode research logging");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--decode-research-jsonl", ""});
+                      }),
+                      "CLI accepted an empty decode research output path");
     failures +=
         check(rejects([] {
                   (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--top-k", "21"});
