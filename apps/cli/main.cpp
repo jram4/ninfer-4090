@@ -8,6 +8,7 @@
 
 #include "ninfer/engine.h"
 
+#include <atomic>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -288,6 +289,7 @@ int main(int argc, char** argv) {
         engine_options.startup_observer                     = startup_log.observer();
 
         std::ofstream decode_research_log;
+        std::atomic<bool> decode_research_write_failed{false};
         if (!cli.decode_research_jsonl.empty()) {
             std::error_code filesystem_error;
             if (std::filesystem::exists(cli.decode_research_jsonl, filesystem_error) &&
@@ -304,27 +306,49 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("could not open decode research JSONL output");
             }
             engine_options.decode_research_observer.callback = [&](const auto& event) {
-                ninfer::product::write_decode_research_event(decode_research_log, event);
+                try {
+                    ninfer::product::write_decode_research_event(decode_research_log, event);
+                } catch (...) {
+                    decode_research_write_failed.store(true, std::memory_order_relaxed);
+                }
+                if (!decode_research_log) {
+                    decode_research_write_failed.store(true, std::memory_order_relaxed);
+                }
             };
         }
 
-        ninfer::Engine engine(std::move(engine_options));
-        startup_log.engine_ready(engine.load_summary());
-        engine.reset_memory_peaks();
-
-        ninfer::PreparedPrompt prompt = engine.prepare(std::move(input));
-
-        StreamingSink sink;
-        ninfer::GenerationHandle generation = engine.submit(std::move(prompt), std::move(request),
-                                                            ninfer::OutputConsumerMode::Streaming);
-        const ninfer::ResolvedSamplingParameters sampling = generation.resolved_sampling();
         ninfer::GenerationResult result;
-        try {
-            result = generation.wait(&sink);
-            sink.finish_streams();
-        } catch (...) {
-            sink.finish_streams(false);
-            throw;
+        ninfer::ResolvedSamplingParameters sampling;
+        ninfer::MemorySummary memory_summary;
+        {
+            ninfer::Engine engine(std::move(engine_options));
+            startup_log.engine_ready(engine.load_summary());
+            engine.reset_memory_peaks();
+
+            ninfer::PreparedPrompt prompt = engine.prepare(std::move(input));
+
+            StreamingSink sink;
+            ninfer::GenerationHandle generation =
+                engine.submit(std::move(prompt), std::move(request),
+                              ninfer::OutputConsumerMode::Streaming);
+            sampling = generation.resolved_sampling();
+            try {
+                result = generation.wait(&sink);
+                sink.finish_streams();
+            } catch (...) {
+                sink.finish_streams(false);
+                throw;
+            }
+            memory_summary = engine.memory_summary();
+        }
+
+        if (!cli.decode_research_jsonl.empty()) {
+            decode_research_log.flush();
+            decode_research_log.close();
+            if (decode_research_write_failed.load(std::memory_order_relaxed) ||
+                !decode_research_log) {
+                throw std::runtime_error("could not write decode research JSONL output");
+            }
         }
 
         std::cerr << "phase       detail                      elapsed/progress\n";
@@ -336,7 +360,7 @@ int main(int argc, char** argv) {
             }
             std::cerr << '\n';
         }
-        print_generation_summary(result, sampling, engine.memory_summary());
+        print_generation_summary(result, sampling, memory_summary);
         return 0;
     } catch (const std::exception& error) {
         logger->error("{}", ninfer::product::format_pretty_text(error.what()));

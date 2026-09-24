@@ -83,6 +83,8 @@ class DecodeResearchAnalysisTest(unittest.TestCase):
                 accepted_prefix=0,
                 licensed_count=1,
                 committed_count=1,
+                terminal=True,
+                finish_reason="output_limit",
             ),
             event(
                 engine_round_id=2,
@@ -91,9 +93,9 @@ class DecodeResearchAnalysisTest(unittest.TestCase):
                 batch_size=1,
                 round_elapsed_ns=3_000_000,
                 context_frontier=1027,
-                draft_extent=1,
-                accepted_prefix=1,
-                licensed_count=2,
+                draft_extent=2,
+                accepted_prefix=2,
+                licensed_count=3,
                 committed_count=1,
                 terminal=True,
                 truncated=True,
@@ -109,8 +111,11 @@ class DecodeResearchAnalysisTest(unittest.TestCase):
         self.assertAlmostEqual(summary["round_elapsed_seconds"], 0.004)
         self.assertEqual(summary["request_rounds"], 3)
         self.assertEqual(summary["engine_rounds"], 2)
-        self.assertAlmostEqual(summary["weighted_draft_acceptance"], 0.6)
-        self.assertEqual(summary["terminal_request_rounds"], 1)
+        self.assertAlmostEqual(summary["weighted_draft_acceptance"], 2 / 3)
+        self.assertAlmostEqual(summary["weighted_committed_draft_acceptance"], 0.5)
+        self.assertEqual(summary["accepted_draft_tokens"], 4)
+        self.assertEqual(summary["committed_accepted_draft_tokens"], 3)
+        self.assertEqual(summary["terminal_request_rounds"], 2)
         self.assertEqual(summary["truncated_request_rounds"], 1)
         self.assertEqual(
             summary["context_frontier"],
@@ -127,15 +132,23 @@ class DecodeResearchAnalysisTest(unittest.TestCase):
                     "draft_work_per_request_round": 1.0,
                     "accepted_per_request_round": 2 / 3,
                     "rejected_drafts_per_request_round": 1 / 3,
+                    "committed_accepted_request_rounds": 2,
+                    "committed_survival": 2 / 3,
+                    "committed_accepted_per_request_round": 2 / 3,
+                    "accepted_but_uncommitted_per_request_round": 0.0,
                 },
                 {
                     "position": 2,
-                    "eligible_request_rounds": 2,
-                    "accepted_request_rounds": 1,
-                    "survival": 0.5,
-                    "draft_work_per_request_round": 2 / 3,
-                    "accepted_per_request_round": 1 / 3,
+                    "eligible_request_rounds": 3,
+                    "accepted_request_rounds": 2,
+                    "survival": 2 / 3,
+                    "draft_work_per_request_round": 1.0,
+                    "accepted_per_request_round": 2 / 3,
                     "rejected_drafts_per_request_round": 1 / 3,
+                    "committed_accepted_request_rounds": 1,
+                    "committed_survival": 1 / 3,
+                    "committed_accepted_per_request_round": 1 / 3,
+                    "accepted_but_uncommitted_per_request_round": 1 / 3,
                 },
             ],
         )
@@ -149,12 +162,129 @@ class DecodeResearchAnalysisTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "expected 2"):
                 ANALYZER.load_events(path)
 
+            path.write_text(
+                "".join(json.dumps(row) + "\n" for row in self.rows[:2]) + '{"schema":',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "invalid JSON"):
+                ANALYZER.load_events(path)
+
+            duplicate_elapsed = json.dumps(self.rows[0])[:-1] + ',"round_elapsed_ns":1}'
+            path.write_text(duplicate_elapsed + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate JSON object key 'round_elapsed_ns'"):
+                ANALYZER.load_events(path)
+
+    def test_rejects_duplicate_rows_and_conflicting_shared_timing(self):
+        duplicate = [dict(self.rows[0]), dict(self.rows[0])]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad-batch.jsonl"
+            path.write_text("".join(json.dumps(row) + "\n" for row in duplicate), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate request-round identity"):
+                ANALYZER.load_events(path)
+
+            conflicting_timing = [dict(row) for row in self.rows[:2]]
+            conflicting_timing[1]["round_elapsed_ns"] += 1
+            path.write_text(
+                "".join(json.dumps(row) + "\n" for row in conflicting_timing),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "shared timing/config differs"):
+                ANALYZER.load_events(path)
+
     def test_rejects_inconsistent_commit_and_terminal_state(self):
         broken_prefix = dict(self.rows[0], committed_draft_prefix=0)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bad.jsonl"
             path.write_text(json.dumps(broken_prefix) + "\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "committed draft prefix"):
+                ANALYZER.load_events(path)
+
+    def test_rejects_out_of_range_width_and_uint64_overflow(self):
+        too_wide = dict(self.rows[0], draft_window=1_000_000_000, draft_extent=1_000_000_000)
+        with self.assertRaisesRegex(ValueError, "backend maximum"):
+            ANALYZER._validate_event(too_wide, Path("wide.jsonl"), 1)
+
+        overflow = dict(self.rows[0], round_elapsed_ns=1 << 64)
+        with self.assertRaisesRegex(ValueError, "unsigned 64-bit"):
+            ANALYZER._validate_event(overflow, Path("overflow.jsonl"), 1)
+
+    def test_rejects_sparse_uint64_round_identity_without_allocating_by_id(self):
+        sparse_round = dict(
+            self.rows[0],
+            engine_round_id=(1 << 64) - 1,
+            batch_size=1,
+            terminal=True,
+            finish_reason="stop_token",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sparse-round.jsonl"
+            path.write_text(json.dumps(sparse_round) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "engine round sequence has a gap"):
+                ANALYZER.load_events(path)
+
+    def test_rejects_impossible_cancel_and_nonterminal_truncation(self):
+        cancelled_with_commit = dict(
+            self.rows[0],
+            batch_size=1,
+            cancelled=True,
+            terminal=True,
+            finish_reason="cancelled",
+            committed_count=1,
+            committed_draft_prefix=1,
+        )
+        with self.assertRaisesRegex(ValueError, "cancelled rows cannot commit"):
+            ANALYZER._validate_event(cancelled_with_commit, Path("cancel.jsonl"), 1)
+
+        nonterminal_truncation = dict(
+            self.rows[0],
+            batch_size=1,
+            terminal=False,
+            truncated=True,
+            finish_reason="none",
+            committed_count=1,
+            committed_draft_prefix=1,
+        )
+        with self.assertRaisesRegex(ValueError, "truncated row must be terminal"):
+            ANALYZER._validate_event(nonterminal_truncation, Path("truncated.jsonl"), 1)
+
+    def test_rejects_unfinished_requests_and_rounds_after_terminal(self):
+        unfinished = dict(self.rows[0], batch_size=1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "unfinished.jsonl"
+            path.write_text(json.dumps(unfinished) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "request sequence is incomplete"):
+                ANALYZER.load_events(path)
+
+            first = dict(unfinished, terminal=True, finish_reason="stop_token")
+            second = dict(
+                unfinished,
+                engine_round_id=2,
+                request_round_index=2,
+                terminal=True,
+                finish_reason="stop_token",
+            )
+            path.write_text(
+                json.dumps(first) + "\n" + json.dumps(second) + "\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "continues after terminal"):
+                ANALYZER.load_events(path)
+
+    def test_rejects_configuration_change_inside_engine_session(self):
+        first = dict(self.rows[0], batch_size=1, terminal=True, finish_reason="stop_token")
+        second = dict(
+            first,
+            engine_round_id=2,
+            request_id=2,
+            request_round_index=1,
+            backend="dflash",
+            draft_window=3,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "configuration-change.jsonl"
+            path.write_text(
+                json.dumps(first) + "\n" + json.dumps(second) + "\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "changed within session"):
                 ANALYZER.load_events(path)
 
     def test_target_only_k0_has_no_speculative_survival_curve(self):
@@ -171,6 +301,8 @@ class DecodeResearchAnalysisTest(unittest.TestCase):
                 "committed_count": 1,
                 "engine_round_id": 1,
                 "request_id": 1,
+                "terminal": True,
+                "finish_reason": "output_limit",
             }
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -180,6 +312,7 @@ class DecodeResearchAnalysisTest(unittest.TestCase):
         summary = ANALYZER.summarize(loaded)["groups"][0]
         self.assertEqual(summary["committed_tokens"], 1)
         self.assertIsNone(summary["weighted_draft_acceptance"])
+        self.assertIsNone(summary["weighted_committed_draft_acceptance"])
         self.assertEqual(summary["marginal_width"], [])
 
 

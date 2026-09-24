@@ -77,7 +77,8 @@ backend/window/graph settings, pre-round context frontier, actual draft extent, 
 draft prefix, Engine-committed count, terminal/truncation state, and round elapsed nanoseconds. A
 compact batch writes one row per request with the same engine round ID and elapsed time. No prompt,
 generated text, token IDs, or client identity is recorded. The file is appended to, so keep records
-from separate source revisions or configurations in separately labeled files.
+from separate source revisions or configurations in separately labeled files. The CLI reports
+buffered write or close failures and returns a nonzero status if capture fails.
 The first token produced by prefill is not a decode-round event.
 
 The measured round time begins before Program decode and ends after Program commit, Engine output
@@ -86,8 +87,9 @@ Engine committed fewer tokens than Program licensed, except for cancellation; `a
 the verifier's accepted draft prefix, while `committed_draft_prefix` is the part of that prefix
 committed by Engine.
 
-Summarize a file with ratio-of-sums throughput and extent-conditioned survival/marginal-width
-quantities:
+Summarize a completed file with ratio-of-sums throughput and extent-conditioned survival and
+commit-aware marginal-width quantities. The analyzer rejects incomplete batches, unfinished request
+sequences, impossible counter values, and configuration changes inside one Engine session:
 
 ```bash
 python3.11 tools/analyze_decode_research.py runs/decode.jsonl
@@ -96,7 +98,8 @@ python3.11 tools/analyze_decode_research.py runs/decode.jsonl
 The analyzer counts each shared compact-batch round time once when calculating
 `sum(committed_count) / sum(round_elapsed_ns)`. Per-position survival conditions on rows whose
 actual draft extent reached that position, so short terminal extents do not depress the survival
-denominator.
+denominator. Verifier acceptance and Engine-committed accepted drafts are reported separately,
+exposing work accepted by the target but discarded by stop or output policy.
 
 For example, this allows at most 512 model-origin thinking tokens while retaining enough total
 output capacity for the inserted suffix and the answer:

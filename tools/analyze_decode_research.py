@@ -37,7 +37,31 @@ INTEGER_FIELDS = {
     "committed_count",
     "round_elapsed_ns",
 }
+UINT32_FIELDS = INTEGER_FIELDS - {
+    "engine_session_id",
+    "engine_round_id",
+    "request_id",
+    "request_round_index",
+    "round_elapsed_ns",
+}
+UINT32_MAX = (1 << 32) - 1
+UINT64_MAX = (1 << 64) - 1
+MAX_BATCH_SIZE = 8
+MAX_DRAFT_WINDOW = {"none": 0, "mtp": 10, "dflash": 15, "dflash2": 15}
 BOOLEAN_FIELDS = {"cuda_graph", "terminal", "truncated", "cancelled"}
+
+
+class _DuplicateJSONKey(ValueError):
+    pass
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJSONKey(f"duplicate JSON object key {key!r}")
+        result[key] = value
+    return result
 
 
 def _validate_event(event: Any, path: Path, line_number: int) -> dict[str, Any]:
@@ -48,8 +72,15 @@ def _validate_event(event: Any, path: Path, line_number: int) -> dict[str, Any]:
         raise ValueError(f"{label}: expected schema {SCHEMA!r}")
     for field in INTEGER_FIELDS:
         value = event.get(field)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError(f"{label}: {field} must be a non-negative integer")
+        maximum = UINT32_MAX if field in UINT32_FIELDS else UINT64_MAX
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or value > maximum
+        ):
+            bits = 32 if field in UINT32_FIELDS else 64
+            raise ValueError(f"{label}: {field} must be an unsigned {bits}-bit integer")
     for field in BOOLEAN_FIELDS:
         if not isinstance(event.get(field), bool):
             raise ValueError(f"{label}: {field} must be boolean")
@@ -57,6 +88,10 @@ def _validate_event(event: Any, path: Path, line_number: int) -> dict[str, Any]:
         raise ValueError(f"{label}: invalid backend")
     if event.get("finish_reason") not in FINISH_REASONS:
         raise ValueError(f"{label}: invalid finish_reason")
+    if event["batch_size"] > MAX_BATCH_SIZE:
+        raise ValueError(f"{label}: batch_size exceeds Engine maximum concurrency")
+    if event["draft_window"] > MAX_DRAFT_WINDOW[event["backend"]]:
+        raise ValueError(f"{label}: draft_window exceeds backend maximum")
     if event["engine_session_id"] == 0 or event["engine_round_id"] == 0:
         raise ValueError(f"{label}: engine session and round identifiers must be positive")
     if event["request_id"] == 0 or event["request_round_index"] == 0:
@@ -81,6 +116,12 @@ def _validate_event(event: Any, path: Path, line_number: int) -> dict[str, Any]:
         raise ValueError(f"{label}: terminal state disagrees with finish_reason")
     if event["cancelled"] != (event["finish_reason"] == "cancelled"):
         raise ValueError(f"{label}: cancellation state disagrees with finish_reason")
+    if event["cancelled"] and event["committed_count"] != 0:
+        raise ValueError(f"{label}: cancelled rows cannot commit tokens")
+    if not event["cancelled"] and event["committed_count"] == 0:
+        raise ValueError(f"{label}: non-cancelled rows must commit at least one token")
+    if event["truncated"] and not event["terminal"]:
+        raise ValueError(f"{label}: a truncated row must be terminal")
     if event["backend"] == "none" and event["draft_window"] != 0:
         raise ValueError(f"{label}: ordinary decoding must have draft_window=0")
     if event["backend"] == "none" and (
@@ -103,28 +144,37 @@ def load_events(path: Path) -> list[dict[str, Any]]:
             if not raw.strip():
                 continue
             try:
-                event = json.loads(raw)
+                event = json.loads(raw, object_pairs_hook=_unique_json_object)
             except json.JSONDecodeError as error:
                 raise ValueError(f"{path}:{line_number}: invalid JSON: {error.msg}") from error
+            except _DuplicateJSONKey as error:
+                raise ValueError(f"{path}:{line_number}: {error}") from error
             events.append(_validate_event(event, path, line_number))
     if not events:
         raise ValueError(f"{path}: no decode research records found")
 
     seen_request_rounds: set[tuple[int, int, int]] = set()
     engine_rounds: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
-    request_sequences: dict[tuple[int, int], list[int]] = defaultdict(list)
+    request_events: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    session_configs: dict[int, tuple[str, int, bool]] = {}
     for event in events:
+        session = event["engine_session_id"]
+        config = (event["backend"], event["draft_window"], event["cuda_graph"])
+        if session in session_configs and session_configs[session] != config:
+            raise ValueError(
+                f"{path}: backend, width, or graph setting changed within session {session}"
+            )
+        session_configs[session] = config
+
         request_round = (
-            event["engine_session_id"],
+            session,
             event["request_id"],
             event["request_round_index"],
         )
         if request_round in seen_request_rounds:
             raise ValueError(f"{path}: duplicate request-round identity {request_round}")
         seen_request_rounds.add(request_round)
-        request_sequences[(event["engine_session_id"], event["request_id"])].append(
-            event["request_round_index"]
-        )
+        request_events[(session, event["request_id"])].append(event)
         engine_rounds[(event["engine_session_id"], event["engine_round_id"])].append(event)
 
     shared_fields = ("batch_size", "round_elapsed_ns", "backend", "draft_window", "cuda_graph")
@@ -143,11 +193,24 @@ def load_events(path: Path) -> list[dict[str, Any]]:
     for session_id, round_id in engine_rounds:
         engine_round_sequences[session_id].append(round_id)
     for session_id, round_ids in engine_round_sequences.items():
-        if sorted(round_ids) != list(range(1, max(round_ids) + 1)):
+        ordered_round_ids = sorted(round_ids)
+        if ordered_round_ids != list(range(1, len(ordered_round_ids) + 1)):
             raise ValueError(f"{path}: engine round sequence has a gap for session {session_id}")
-    for identity, round_ids in request_sequences.items():
-        if sorted(round_ids) != list(range(1, max(round_ids) + 1)):
-            raise ValueError(f"{path}: request round sequence has a gap for identity {identity}")
+    for identity, rows in request_events.items():
+        ordered_rows = sorted(rows, key=lambda row: row["engine_round_id"])
+        round_indexes = [row["request_round_index"] for row in ordered_rows]
+        if round_indexes != list(range(1, len(round_indexes) + 1)):
+            raise ValueError(
+                f"{path}: request round order has a gap or reversal for identity {identity}"
+            )
+        terminal_positions = [
+            index for index, row in enumerate(ordered_rows) if row["terminal"]
+        ]
+        if terminal_positions != [len(ordered_rows) - 1]:
+            raise ValueError(
+                f"{path}: request sequence is incomplete or continues after terminal "
+                f"for identity {identity}"
+            )
     return events
 
 
@@ -159,6 +222,7 @@ def _summarize_group(events: list[dict[str, Any]]) -> dict[str, Any]:
     committed = sum(event["committed_count"] for event in events)
     draft_tokens = sum(event["draft_extent"] for event in events)
     accepted = sum(event["accepted_prefix"] for event in events)
+    committed_draft_tokens = sum(event["committed_draft_prefix"] for event in events)
     context_values = [event["context_frontier"] for event in events]
     request_round_count = len(events)
     rate = committed * 1_000_000_000 / round_elapsed_ns if round_elapsed_ns else None
@@ -168,6 +232,9 @@ def _summarize_group(events: list[dict[str, Any]]) -> dict[str, Any]:
     for position in range(1, max_width + 1):
         eligible = sum(event["draft_extent"] >= position for event in events)
         survived = sum(event["accepted_prefix"] >= position for event in events)
+        committed_survived = sum(
+            event["committed_draft_prefix"] >= position for event in events
+        )
         marginal_width.append(
             {
                 "position": position,
@@ -177,6 +244,14 @@ def _summarize_group(events: list[dict[str, Any]]) -> dict[str, Any]:
                 "draft_work_per_request_round": eligible / request_round_count,
                 "accepted_per_request_round": survived / request_round_count,
                 "rejected_drafts_per_request_round": (eligible - survived) / request_round_count,
+                "committed_accepted_request_rounds": committed_survived,
+                "committed_survival": committed_survived / eligible if eligible else None,
+                "committed_accepted_per_request_round": (
+                    committed_survived / request_round_count
+                ),
+                "accepted_but_uncommitted_per_request_round": (
+                    survived - committed_survived
+                ) / request_round_count,
             }
         )
 
@@ -187,8 +262,12 @@ def _summarize_group(events: list[dict[str, Any]]) -> dict[str, Any]:
         "round_elapsed_seconds": round_elapsed_ns / 1_000_000_000,
         "committed_tokens_per_second": rate,
         "weighted_draft_acceptance": accepted / draft_tokens if draft_tokens else None,
+        "weighted_committed_draft_acceptance": (
+            committed_draft_tokens / draft_tokens if draft_tokens else None
+        ),
         "drafted_tokens": draft_tokens,
         "accepted_draft_tokens": accepted,
+        "committed_accepted_draft_tokens": committed_draft_tokens,
         "terminal_request_rounds": sum(event["terminal"] for event in events),
         "truncated_request_rounds": sum(event["truncated"] for event in events),
         "cancelled_request_rounds": sum(event["cancelled"] for event in events),
