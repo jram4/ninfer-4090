@@ -20,8 +20,10 @@ K8V4 KV cache (FP8 keys, NVFP4 values), 188,416-token engine context, concurrenc
 
 K0 is plain autoregressive decode (no speculation); it is the raw decode baseline. Speculative
 throughput depends on how often the target model accepts the drafted tokens, so it varies by
-roughly 3x across workloads. The 200+ tok/s figures apply to predictable output (retrieval,
-structured data, code), not to open-ended prose.
+roughly 3x across workloads. These 2026-09-23 figures use greedy decoding on the stock model.
+The 200+ tok/s figures apply to predictable output (retrieval, structured data, code), not to
+temperature-1 Claude Code traffic. [Current-branch measurements](#current-sampled-drafting-branch)
+below keep the two workloads separate.
 
 ## Results
 
@@ -77,6 +79,57 @@ Prefill and time to first token (TTFT) at K7:
 | 189,004 | 127.4 s | 1,485 |
 
 Prefill speed does not depend on K.
+
+### Current sampled-drafting branch
+
+The integrated branch samples each positive-temperature MTP proposal from its own distribution
+`q` (top-12 support) and uses target probabilities `p` for acceptance and the residual
+`(p-q)+` after rejection. The target sampling settings are unchanged. A multiblock selector
+keeps proposal selection inexpensive for the wide Q4 draft head. Greedy requests retain the
+greedy proposal route. Tests cover generated `q` passed through target verification, rejection,
+and residual correction.
+
+The stock-model K7 greedy matrix was rerun on 2026-09-24 with the integrated binary, the same
+script and settings as the table above (two repetitions for short cases, one for recall). The
+current results are essentially the same as the 2026-09-23 K7 column; the other K columns above
+are historical controls and were not rerun.
+
+| Workload | Previous K7 tok/s | Current K7 tok/s |
+|---|---:|---:|
+| short answer | 112.2 | 111.4 |
+| structured JSON | 228.0 | 221.6 |
+| code | 209.1 | 209.2 |
+| reasoning (thinking on) | 179.9 | 179.9 |
+| prose | 87.7 | 88.8 |
+| long generation | 96.6 | 97.3 |
+| needle recall 8K | 275.2 | 275.5 |
+| needle recall 32K | 263.1 | 263.4 |
+| needle recall 64K | 247.8 | 248.1 |
+| needle recall 131K | 226.1 | 226.1 |
+| needle recall 189K | 209.4 | 209.6 |
+
+All six recall markers passed at every length. The code workload's generated unit tests failed,
+as they did in the original matrix. The [current K7 summary](results/rtx4090-20260924-sampled/greedy-k7-summary.json)
+contains the measured rates, acceptance, TTFT, and checks.
+
+A separate replay measured the workload that motivated sampled drafting: 32 successful
+temperature-1 Claude Code requests on the abliterated model, in captured order with byte-identical
+request bodies, prefix reuse, K7, Q4 draft head, K8V4, and seed 42. Both builds used the same
+prompts and production flags. This is a **decode-rate** comparison, not the greedy matrix above:
+
+| Captured production replay | Greedy drafts | Sampled drafts | Change |
+|---|---:|---:|---:|
+| Aggregate decode tok/s | 127.4 | 141.6 | +11.1% |
+| Tokens per round | 3.80 | 4.20 | +10.5% |
+| Mean ms per round | 29.82 | 29.68 | -0.5% |
+
+The sampled build was faster on 27 of 32 paired requests (paired decode-rate geometric mean
++12.5%); both runs returned HTTP 200 for all 32. Output lengths and tool-call counts differed,
+so this replay does not assess task quality or imply matching text at a fixed seed. Exact
+rejection correction is intended to preserve the target sampling distribution, which is covered
+by the focused sampling and speculative-round tests. The private request bodies are not
+redistributed; [aggregate replay data](results/rtx4090-20260924-sampled/temperature1-replay-summary.json)
+records the measurement.
 
 ### Comparison with the previous 4090 engine
 
@@ -159,6 +212,9 @@ Perplexity was not re-measured. Prefill changed only through the bit-identical V
 
 On top of the Cinference RTX 4090 port (MTP-10, Ada fallbacks, K8V4 cache):
 
+- **Sampled MTP drafting at positive temperature:** draft probabilities are carried into exact
+  sparse target rejection correction, with a multiblock top-12 proposal selector for the
+  131,072-row Q4 head. Greedy decoding continues to use greedy drafts.
 - **Faster NVFP4 V-cache decode:** E2M1 nibbles are placed directly into FP16 bits and
   scaled with two `HMUL2`s, replacing a per-nibble switch
   (`src/ops/kv_cache/nvfp4_group16_codec.cuh`). Measured during development at 25K keys:

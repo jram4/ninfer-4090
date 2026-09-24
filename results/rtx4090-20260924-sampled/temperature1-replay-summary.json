@@ -1,0 +1,67 @@
+{
+  "date": "2026-09-24",
+  "hardware": "NVIDIA RTX 4090 24 GB",
+  "model": "abliterated Qwen3.8-27B .ninfer artifact",
+  "mode": "K7 MTP with optimized Q4 proposal head, k8v4 KV",
+  "sampling": "captured Claude Code requests, temperature 1.0, prefix reuse on, fixed server seed 42",
+  "max_context_tokens": 188416,
+  "method": "32 captured successful requests replayed byte-identically and in original order against both builds; private request bodies are not redistributed",
+  "baseline": "greedy draft proposal with exact target verification",
+  "candidate": "sampled top-12 q proposal with sparse exact rejection correction and multiblock proposal selection",
+  "paired_request_count": 32,
+  "paired_decode_rate_geomean_ratio": 1.125403,
+  "paired_requests_faster": 27,
+  "baseline_aggregate": {
+    "request_count": 32,
+    "http_status_counts": {
+      "200": 32
+    },
+    "http_error_count": 0,
+    "transport_error_count": 0,
+    "successful_paired_request_count": 32,
+    "output_tokens_total": 58412,
+    "decode_seconds_total": 458.373729,
+    "aggregate_decode_tok_per_s": 127.433132,
+    "aggregate_tokens_per_round": 3.800638,
+    "aggregate_ms_per_round": 29.824564,
+    "mean_server_ttft_seconds": 1.712285,
+    "median_server_ttft_seconds": 0.955132,
+    "mean_client_ttft_seconds": 3.058907,
+    "median_client_ttft_seconds": 2.691852,
+    "tool_requests": 32,
+    "tool_call_count_total": 60,
+    "tool_parse_fallback_reason_counts": {
+      "none": 32
+    },
+    "tool_parse_schema_mismatch_arguments_total": 0,
+    "tool_parse_structured_call_count_total": 60,
+    "tool_parse_empty_arguments_omitted_total": 0
+  },
+  "candidate_aggregate": {
+    "request_count": 32,
+    "http_status_counts": {
+      "200": 32
+    },
+    "http_error_count": 0,
+    "transport_error_count": 0,
+    "successful_paired_request_count": 32,
+    "output_tokens_total": 46590,
+    "decode_seconds_total": 329.127211,
+    "aggregate_decode_tok_per_s": 141.556208,
+    "aggregate_tokens_per_round": 4.201082,
+    "aggregate_ms_per_round": 29.677837,
+    "mean_server_ttft_seconds": 1.714554,
+    "median_server_ttft_seconds": 0.954549,
+    "mean_client_ttft_seconds": 2.778435,
+    "median_client_ttft_seconds": 2.049922,
+    "tool_requests": 31,
+    "tool_call_count_total": 44,
+    "tool_parse_fallback_reason_counts": {
+      "none": 31
+    },
+    "tool_parse_schema_mismatch_arguments_total": 0,
+    "tool_parse_structured_call_count_total": 44,
+    "tool_parse_empty_arguments_omitted_total": 0
+  },
+  "interpretation": "Decode throughput and protocol metrics; output lengths and tool calls differ, so this is not an answer-quality evaluation."
+}

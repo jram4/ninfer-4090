@@ -1,0 +1,128 @@
+{
+  "date": "2026-09-24",
+  "hardware": "NVIDIA RTX 4090 24 GB",
+  "model": "stock Qwen3.8-27B v3 .ninfer artifact",
+  "mode": "K7 MTP with optimized Q4 proposal head",
+  "sampling": "greedy, thinking disabled except reasoning, prefix reuse disabled",
+  "max_context_tokens": 196608,
+  "kv_dtype": "k8v4",
+  "method": "tools/bench/cinf_matrix.py; current integrated sampled-drafting branch",
+  "workloads": {
+    "short": {
+      "prompt_tokens": 24,
+      "decode_tok_per_s_median": 111.405,
+      "draft_acceptance_median": 0.714286,
+      "ttft_seconds_median": 0.079603,
+      "repetitions": 2,
+      "checks": [
+        "pass",
+        "pass"
+      ]
+    },
+    "structured": {
+      "prompt_tokens": 77,
+      "decode_tok_per_s_median": 221.632,
+      "draft_acceptance_median": 0.714286,
+      "ttft_seconds_median": 0.104284,
+      "repetitions": 2,
+      "checks": [
+        "pass",
+        "pass"
+      ]
+    },
+    "code": {
+      "prompt_tokens": 69,
+      "decode_tok_per_s_median": 209.177,
+      "draft_acceptance_median": 0.654235,
+      "ttft_seconds_median": 0.102576,
+      "repetitions": 2,
+      "checks": [
+        "tests-failed",
+        "tests-failed"
+      ]
+    },
+    "prose": {
+      "prompt_tokens": 34,
+      "decode_tok_per_s_median": 88.821,
+      "draft_acceptance_median": 0.195057,
+      "ttft_seconds_median": 0.082435,
+      "repetitions": 2,
+      "checks": [
+        "pass",
+        "pass"
+      ]
+    },
+    "reason": {
+      "prompt_tokens": 122,
+      "decode_tok_per_s_median": 179.86,
+      "draft_acceptance_median": 0.540816,
+      "ttft_seconds_median": 0.117598,
+      "repetitions": 2,
+      "checks": [
+        "pass",
+        "pass"
+      ]
+    },
+    "long_gen": {
+      "prompt_tokens": 55,
+      "decode_tok_per_s_median": 97.259,
+      "draft_acceptance_median": 0.230297,
+      "ttft_seconds_median": 0.097428,
+      "repetitions": 2,
+      "checks": [
+        "pass",
+        "pass"
+      ]
+    },
+    "recall_8192": {
+      "prompt_tokens": 8219,
+      "decode_tok_per_s_median": 275.465,
+      "draft_acceptance_median": 0.985714,
+      "ttft_seconds_median": 3.601061,
+      "repetitions": 1,
+      "checks": [
+        "pass"
+      ]
+    },
+    "recall_32768": {
+      "prompt_tokens": 32686,
+      "decode_tok_per_s_median": 263.431,
+      "draft_acceptance_median": 0.985714,
+      "ttft_seconds_median": 15.182907,
+      "repetitions": 1,
+      "checks": [
+        "pass"
+      ]
+    },
+    "recall_65536": {
+      "prompt_tokens": 65275,
+      "decode_tok_per_s_median": 248.11,
+      "draft_acceptance_median": 0.985714,
+      "ttft_seconds_median": 33.14046,
+      "repetitions": 1,
+      "checks": [
+        "pass"
+      ]
+    },
+    "recall_131072": {
+      "prompt_tokens": 130421,
+      "decode_tok_per_s_median": 226.142,
+      "draft_acceptance_median": 0.985714,
+      "ttft_seconds_median": 77.676424,
+      "repetitions": 1,
+      "checks": [
+        "pass"
+      ]
+    },
+    "recall_190000": {
+      "prompt_tokens": 189004,
+      "decode_tok_per_s_median": 209.601,
+      "draft_acceptance_median": 0.985714,
+      "ttft_seconds_median": 127.406156,
+      "repetitions": 1,
+      "checks": [
+        "pass"
+      ]
+    }
+  }
+}
