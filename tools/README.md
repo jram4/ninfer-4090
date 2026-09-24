@@ -9,10 +9,15 @@ for the selected tool. The maintained environment uses Python 3.11.
 
 Python tools are independent of CMake; there is no `NINFER_BUILD_TOOLS` option.
 
+For isolated FNN research checkouts, private per-worker build/result paths, provenance, and a
+shared GPU lock, see [the research workspace guide](../docs/maintainer/fnn-research-workspaces.md).
+Run its local identity/path guard tests with `python3 -m unittest tests.tools.test_fnn_workspace`.
+
 ## Task index
 
 | Task | Location |
 |---|---|
+| Create an isolated FNN research checkout and output root | [`research/fnn_workspace.py`](research/fnn_workspace.py); [workflow guide](../docs/maintainer/fnn-research-workspaces.md) |
 | Convert weights with an official or custom recipe | [`convert/`](convert/); [user guide](../docs/weight-conversion.md) |
 | Inspect artifact metadata and objects | [`artifact/inspect.py`](artifact/inspect.py) |
 | One-time upgrade of official v2 artifacts | [`upgrade_ninfer_v2_to_v3.py`](upgrade_ninfer_v2_to_v3.py), with positional `INPUT OUTPUT` paths |

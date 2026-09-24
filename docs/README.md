@@ -62,6 +62,7 @@ other references own narrower contracts:
 | [Operational logging](maintainer/logging.md) | log ownership, presentation, severity and data policy |
 | [Linear benchmark](maintainer/linear-benchmark.md) | pure Linear measurement, metrics and suites |
 | [Linear tuning and reports](maintainer/linear-tuning.md) | tuning ranges, priority points, dispatch tradeoffs and final performance report format |
+| [Isolated FNN research workspaces](maintainer/fnn-research-workspaces.md) | per-worker remote checkout/build/result paths, provenance, path guards and serialized GPU access |
 
 Model cards contain official artifact facts and source provenance. The
 [conversion guide](weight-conversion.md) is the entry point for making an artifact. Exact config
