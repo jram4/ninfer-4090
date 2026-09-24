@@ -104,6 +104,9 @@ ninfer_add_op_test(ninfer_speculative_round_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_speculative_round.cpp"
   LIBRARIES ninfer_ops)
 
+ninfer_add_test(ninfer_speculative_sampling_distribution_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_speculative_sampling_distribution.cpp")
+
 ninfer_add_op_test(ninfer_attn_input_proj_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_attn_input_proj.cpp"
   LIBRARIES ninfer_ops)

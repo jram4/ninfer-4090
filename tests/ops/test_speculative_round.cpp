@@ -563,7 +563,8 @@ struct SparseAcceptSuite {
         return failures;
     }
 
-    int sparse_greedy_direct_case(int pattern = 0, bool general = false) {
+    int sparse_greedy_direct_case(int pattern = 0, bool general = false,
+                                  bool invalidate_target_tokens = false) {
         std::vector<std::int32_t> targets(kSparseColumns * kSparseBatch),
             drafts(kSparseDrafts * kSparseBatch);
         std::vector<std::uint16_t> logits(static_cast<std::size_t>(kSparsePhysicalRows) *
@@ -589,7 +590,8 @@ struct SparseAcceptSuite {
             lengths[row]     = 4096 + row * 13;
             for (int col = 0; col < kSparseColumns; ++col) {
                 const int target                             = 100000 + row * 128 + col;
-                targets[row * kSparseColumns + col]          = target;
+                targets[row * kSparseColumns + col] =
+                    invalidate_target_tokens ? -777 : target;
                 logits[sparse_logit_index(row, col, target)] = f32_to_bf16(20.0f);
                 for (int v = kSparseTokenDomain; v < kSparsePhysicalRows; ++v)
                     logits[sparse_logit_index(row, col, v)] = f32_to_bf16(100.0f);
@@ -1193,6 +1195,318 @@ int transforms_conformance() {
     return failures;
 }
 
+
+int sparse_small_width20_greedy_logits_case() {
+    constexpr int token_domain = 64;
+    constexpr int physical_rows = 64;
+    constexpr int drafts_count = 1;
+    constexpr int columns = drafts_count + 1;
+    constexpr int candidate_count = ops::kSamplingCandidateCapacity;
+    std::vector<float> logits(static_cast<std::size_t>(physical_rows) * columns, -5.0F);
+    logits[2] = 5.0F;
+    logits[physical_rows + 4] = 5.0F;
+    std::vector<int> target_tokens(columns, -777);
+    std::vector<int> drafts{1};
+    std::vector<int> candidates(candidate_count);
+    for (int candidate = 0; candidate < candidate_count; ++candidate)
+        candidates[static_cast<std::size_t>(candidate)] = (1 + candidate) % token_domain;
+    std::vector<float> q(candidate_count, 0.0F);
+    q[0] = 1.0F;
+    std::vector<int> extents{1}, initial_lengths{10}, initial_anchors{0};
+    std::vector<ops::SamplingConfig> configs(1);
+    configs[0].temperature = 0.0F;
+    DeviceBuffer d_target_tokens = to_device(target_tokens);
+    DeviceBuffer d_logits = to_device_bf16(logits);
+    DeviceBuffer d_drafts = to_device(drafts);
+    DeviceBuffer d_candidates = to_device(candidates);
+    DeviceBuffer d_q = to_device(q);
+    DeviceBuffer d_extents = to_device(extents);
+    DeviceBuffer d_configs = to_device(configs);
+    GuardedDeviceBuffer d_lengths(sizeof(int)), d_anchors(sizeof(int));
+    GuardedDeviceBuffer d_licensed(columns * sizeof(int));
+    GuardedDeviceBuffer d_licensed_counts(sizeof(int)), d_accepted(sizeof(int));
+    initialize(d_lengths, initial_lengths);
+    initialize(d_anchors, initial_anchors);
+    d_licensed.fill(0xcd);
+    d_licensed_counts.fill(0xef);
+    d_accepted.fill(0xab);
+    Tensor target_tensor(d_target_tokens.p, DType::I32, {columns, 1});
+    Tensor logits_tensor(d_logits.p, DType::BF16, {physical_rows, columns, 1});
+    Tensor drafts_tensor(d_drafts.p, DType::I32, {drafts_count, 1});
+    Tensor candidates_tensor(d_candidates.p, DType::I32, {candidate_count, drafts_count, 1});
+    Tensor q_tensor(d_q.p, DType::FP32, {candidate_count, drafts_count, 1});
+    Tensor extents_tensor(d_extents.p, DType::I32, {1});
+    Tensor lengths_tensor(d_lengths.data(), DType::I32, {1});
+    Tensor anchors_tensor(d_anchors.data(), DType::I32, {1});
+    Tensor licensed_tensor(d_licensed.data(), DType::I32, {columns, 1});
+    Tensor licensed_counts_tensor(d_licensed_counts.data(), DType::I32, {1});
+    Tensor accepted_tensor(d_accepted.data(), DType::I32, {1});
+    const std::size_t workspace_bytes =
+        ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
+            token_domain, {false}, drafts_count, drafts_count, 1, 1);
+    GuardedDeviceBuffer scratch(std::max<std::size_t>(workspace_bytes, 1));
+    WorkspaceArena workspace(DeviceSpan{scratch.data(), scratch.bytes()});
+    ops::speculative_accept_sparse_drafts(
+        target_tensor, logits_tensor, drafts_tensor, candidates_tensor, q_tensor,
+        extents_tensor, lengths_tensor, anchors_tensor, licensed_tensor,
+        licensed_counts_tensor, accepted_tensor, token_domain,
+        static_cast<const ops::SamplingConfig*>(d_configs.p), {false}, workspace, nullptr);
+    cuda_synchronize();
+
+    int failures = verify_exact("small sparse greedy correction token",
+                                read<int>(d_licensed, columns), std::vector<int>{2, 0});
+    failures += verify_exact("small sparse greedy accepted count",
+                             read<int>(d_accepted, 1), std::vector<int>{0});
+    failures += verify_exact("small sparse greedy licensed count",
+                             read<int>(d_licensed_counts, 1), std::vector<int>{1});
+    failures += verify_exact("small sparse greedy provisional length",
+                             read<int>(d_lengths, 1), std::vector<int>{11});
+    failures += verify_exact("small sparse greedy anchor",
+                             read<int>(d_anchors, 1), std::vector<int>{2});
+    failures += verify_exact("small sparse target tokens unused",
+                             from_device<int>(d_target_tokens.p, target_tokens.size()), target_tokens);
+    failures += d_lengths.verify_guards("small sparse greedy lengths");
+    failures += d_anchors.verify_guards("small sparse greedy anchors");
+    failures += d_licensed.verify_guards("small sparse greedy licensed tokens");
+    failures += d_licensed_counts.verify_guards("small sparse greedy counts");
+    failures += d_accepted.verify_guards("small sparse greedy accepted");
+    return failures;
+}
+
+int generated_mtp_q_sparse_rejection_case() {
+    constexpr int token_domain = 64;
+    constexpr int drafts_count = 2;
+    constexpr int columns = drafts_count + 1;
+    constexpr int candidate_count = ops::kSamplingCandidateCapacity;
+    constexpr int outside_a = 31;
+    constexpr int outside_b = 32;
+    constexpr int initial_length = 4096;
+    constexpr int initial_anchor = 1;
+
+    // Generate two proposals and their exact q tables through the production MTP op.
+    std::vector<float> mtp_logits(token_domain, -20.0F);
+    mtp_logits[3] = 3.0F;
+    mtp_logits[5] = 2.0F;
+    mtp_logits[7] = 1.0F;
+    round_to_bf16(mtp_logits);
+    DeviceBuffer d_mtp_logits = to_device_bf16(mtp_logits);
+    DeviceBuffer d_positions = to_device<std::int32_t>({128});
+    DeviceBuffer d_round_tokens = to_device<std::int32_t>({initial_anchor, 0, 0});
+    DeviceBuffer d_round_counts = to_device<std::int32_t>({1});
+    DeviceBuffer d_prior = to_device<std::int32_t>({0, 0});
+    ops::SamplingConfig proposal_config{};
+    proposal_config.temperature = 1.0F;
+    proposal_config.top_k = 3;
+    proposal_config.seed = 445566;
+    DeviceBuffer d_proposal_config = to_device(std::vector<ops::SamplingConfig>{proposal_config});
+
+    GuardedDeviceBuffer d_proposal_token(sizeof(int));
+    GuardedDeviceBuffer d_candidate_ids(candidate_count * drafts_count * sizeof(int));
+    GuardedDeviceBuffer d_proposal_q(candidate_count * drafts_count * sizeof(float));
+    d_candidate_ids.fill(0xcd);
+    d_proposal_q.fill(0xef);
+    Tensor mtp_logits_tensor(d_mtp_logits.p, DType::BF16, {token_domain, 1});
+    Tensor proposal_token_tensor(d_proposal_token.data(), DType::I32, {1});
+    Tensor candidate_ids_tensor(d_candidate_ids.data(), DType::I32,
+                                {candidate_count, drafts_count, 1});
+    Tensor proposal_q_tensor(d_proposal_q.data(), DType::FP32,
+                             {candidate_count, drafts_count, 1});
+    Tensor positions_tensor(d_positions.p, DType::I32, {1});
+    Tensor round_tokens_tensor(d_round_tokens.p, DType::I32, {columns, 1});
+    Tensor round_counts_tensor(d_round_counts.p, DType::I32, {1});
+    Tensor prior_tensor(d_prior.p, DType::I32, {1, drafts_count});
+    WorkspaceArena proposal_workspace(
+        std::max<std::size_t>(256, ops::sampling_workspace_capacity_bytes(token_domain, 1, 1)));
+    const auto propose = [&](int step, int prior_count) {
+        ops::sample_mtp_proposal(
+            mtp_logits_tensor, proposal_token_tensor, candidate_ids_tensor, proposal_q_tensor,
+            token_domain, nullptr, static_cast<const ops::SamplingConfig*>(d_proposal_config.p),
+            positions_tensor, round_tokens_tensor, round_counts_tensor, prior_tensor,
+            prior_count, step, step, proposal_workspace, nullptr);
+        cuda_synchronize();
+    };
+    propose(0, 0);
+    const int first_draft = read<int>(d_proposal_token, 1).front();
+    const std::vector<int> prior{first_draft, 0};
+    d_prior.copy_from_host(prior.data(), d_prior.bytes);
+    propose(1, 1);
+    const int second_draft = read<int>(d_proposal_token, 1).front();
+    const std::vector<int> drafts{first_draft, second_draft};
+    const auto candidate_ids = read<int>(d_candidate_ids, candidate_count * drafts_count);
+    const auto proposal_q = read<float>(d_proposal_q, candidate_count * drafts_count);
+    const auto q_for = [&](int step, int token) {
+        const std::size_t base = static_cast<std::size_t>(step) * candidate_count;
+        for (int rank = 0; rank < candidate_count; ++rank) {
+            const std::size_t at = base + static_cast<std::size_t>(rank);
+            if (candidate_ids[at] == token) return static_cast<double>(proposal_q[at]);
+        }
+        return 0.0;
+    };
+
+    int failures = 0;
+    for (int step = 0; step < drafts_count; ++step) {
+        const std::size_t base = static_cast<std::size_t>(step) * candidate_count;
+        double q_sum = 0.0;
+        bool draft_in_q = false;
+        for (int rank = 0; rank < candidate_count; ++rank) {
+            const std::size_t at = base + static_cast<std::size_t>(rank);
+            q_sum += proposal_q[at];
+            if (candidate_ids[at] == drafts[static_cast<std::size_t>(step)] && proposal_q[at] > 0.0F)
+                draft_in_q = true;
+            if (rank >= 3 && (candidate_ids[at] != 0 || proposal_q[at] != 0.0F)) {
+                std::cerr << "generated MTP q wrote beyond top-k support\n";
+                ++failures;
+                break;
+            }
+        }
+        if (std::abs(q_sum - 1.0) > 5.0e-5 || !draft_in_q) {
+            std::cerr << "generated MTP q is not normalized or omits its draft\n";
+            ++failures;
+        }
+    }
+    failures += d_proposal_token.verify_guards("generated MTP proposal token");
+    failures += d_candidate_ids.verify_guards("generated MTP candidate ids");
+    failures += d_proposal_q.verify_guards("generated MTP q");
+
+    // p accepts the first generated draft through the p/q branch. At the second
+    // draft, p is entirely outside q, so rejection must sample the p residual.
+    const double q_first = q_for(0, first_draft);
+    const double desired_p = q_first * 0.5;
+    std::vector<float> target_logits(token_domain * columns, -20.0F);
+    target_logits[static_cast<std::size_t>(first_draft)] =
+        static_cast<float>(std::log(desired_p / (1.0 - desired_p)));
+    target_logits[static_cast<std::size_t>(outside_a)] = 0.0F;
+    target_logits[static_cast<std::size_t>(token_domain) + outside_a] = 0.0F;
+    target_logits[static_cast<std::size_t>(token_domain) + outside_b] = -1.0F;
+    target_logits[static_cast<std::size_t>(2 * token_domain) + outside_a] = 0.0F;
+    target_logits[static_cast<std::size_t>(2 * token_domain) + outside_b] = -1.0F;
+    round_to_bf16(target_logits);
+    const double first_weight =
+        std::exp(static_cast<double>(target_logits[static_cast<std::size_t>(first_draft)]));
+    const double first_p = first_weight / (first_weight + 1.0);
+    const double accept_ratio = first_p / q_first;
+    if (!(q_first > first_p && accept_ratio > 0.0 && accept_ratio < 1.0)) {
+        std::cerr << "generated-q case did not set p(draft)/q(draft) inside (0,1)\n";
+        ++failures;
+    }
+    if (q_for(1, outside_a) != 0.0 || q_for(1, outside_b) != 0.0 ||
+        q_for(1, second_draft) <= 0.0) {
+        std::cerr << "second draft does not have q support disjoint from target residual\n";
+        ++failures;
+    }
+
+    SparseAcceptSuite rng_oracle(drafts_count, 1);
+    ops::SamplingConfig target_config{};
+    target_config.temperature = 1.0F;
+    target_config.top_k = 2;
+    target_config.seed = rng_oracle.find_seed_for_uniform(
+        initial_length + 1, ops::kSamplePurposeSpeculativeAccept, 0.0F,
+        static_cast<float>(accept_ratio * 0.9));
+    const double accept_uniform = rng_oracle.oracle_uniform(
+        target_config.seed, initial_length + 1, ops::kSamplePurposeSpeculativeAccept);
+    if (!(accept_uniform < accept_ratio)) {
+        std::cerr << "seed did not select p/q acceptance for the first generated draft\n";
+        ++failures;
+    }
+    const double outside_a_weight = std::exp(static_cast<double>(
+        target_logits[static_cast<std::size_t>(token_domain) + outside_a]));
+    const double outside_b_weight = std::exp(static_cast<double>(
+        target_logits[static_cast<std::size_t>(token_domain) + outside_b]));
+    const double outside_a_p = outside_a_weight / (outside_a_weight + outside_b_weight);
+    const double correction_uniform = rng_oracle.oracle_uniform(
+        target_config.seed, initial_length + 2, ops::kSamplePurposeSpeculativeCorrection);
+    const int correction = correction_uniform < outside_a_p ? outside_a : outside_b;
+
+    DeviceBuffer d_target_logits = to_device_bf16(target_logits);
+    DeviceBuffer d_target_positions = to_device<std::int32_t>(
+        {initial_length + 1, initial_length + 2, initial_length + 3});
+    DeviceBuffer d_extents = to_device<std::int32_t>({drafts_count});
+    DeviceBuffer d_drafts = to_device(drafts);
+    std::vector<ops::SamplingConfig> target_sample_configs(columns, target_config);
+    DeviceBuffer d_target_sample_configs = to_device(target_sample_configs);
+    DeviceBuffer d_verifier_config = to_device(std::vector<ops::SamplingConfig>{target_config});
+    GuardedDeviceBuffer d_target_tokens(columns * sizeof(int));
+    d_target_tokens.fill(0xab);
+    Tensor target_logits_tensor(d_target_logits.p, DType::BF16, {token_domain, columns});
+    Tensor target_positions_tensor(d_target_positions.p, DType::I32, {columns});
+    Tensor target_tokens_tensor(d_target_tokens.data(), DType::I32, {columns});
+    WorkspaceArena target_sampling_workspace(
+        std::max<std::size_t>(256, ops::sampling_workspace_capacity_bytes(
+                                      token_domain, columns, columns)));
+    ops::sample(target_logits_tensor, target_tokens_tensor, token_domain,
+                static_cast<const ops::SamplingConfig*>(d_target_sample_configs.p),
+                target_positions_tensor, ops::kSamplePurposeDecode,
+                target_sampling_workspace, nullptr);
+    cuda_synchronize();
+    const auto target_tokens = read<int>(d_target_tokens, columns);
+    const double first_outside_weight =
+        std::exp(static_cast<double>(target_logits[static_cast<std::size_t>(outside_a)]));
+    const double first_outside_p = first_outside_weight / (first_weight + first_outside_weight);
+    // Inverse-CDF order follows descending adjusted logits, so outside_a is first.
+    const std::vector<int> expected_target{
+        rng_oracle.oracle_uniform(target_config.seed, initial_length + 1,
+                                  ops::kSamplePurposeDecode) < first_outside_p
+            ? outside_a : first_draft,
+        rng_oracle.oracle_uniform(target_config.seed, initial_length + 2,
+                                  ops::kSamplePurposeDecode) < outside_a_p
+            ? outside_a : outside_b,
+        rng_oracle.oracle_uniform(target_config.seed, initial_length + 3,
+                                  ops::kSamplePurposeDecode) < outside_a_p
+            ? outside_a : outside_b};
+    failures += verify_exact("generated-q target-p sampling oracle", target_tokens, expected_target);
+
+    GuardedDeviceBuffer d_lengths(sizeof(int)), d_anchors(sizeof(int));
+    GuardedDeviceBuffer d_licensed(columns * sizeof(int));
+    GuardedDeviceBuffer d_licensed_counts(sizeof(int)), d_accepted(sizeof(int));
+    initialize(d_lengths, std::vector<int>{initial_length});
+    initialize(d_anchors, std::vector<int>{initial_anchor});
+    d_licensed.fill(0xcd);
+    d_licensed_counts.fill(0xef);
+    d_accepted.fill(0xab);
+    Tensor drafts_tensor(d_drafts.p, DType::I32, {drafts_count, 1});
+    Tensor extents_tensor(d_extents.p, DType::I32, {1});
+    Tensor lengths_tensor(d_lengths.data(), DType::I32, {1});
+    Tensor anchors_tensor(d_anchors.data(), DType::I32, {1});
+    Tensor licensed_tensor(d_licensed.data(), DType::I32, {columns, 1});
+    Tensor licensed_counts_tensor(d_licensed_counts.data(), DType::I32, {1});
+    Tensor accepted_tensor(d_accepted.data(), DType::I32, {1});
+    const std::size_t sparse_workspace_bytes =
+        ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
+            token_domain, {.all_rows_greedy_without_penalties = false},
+            drafts_count, drafts_count, 1, 1);
+    GuardedDeviceBuffer scratch(std::max<std::size_t>(sparse_workspace_bytes, 1));
+    WorkspaceArena sparse_workspace(DeviceSpan{scratch.data(), scratch.bytes()});
+    ops::speculative_accept_sparse_drafts(
+        target_tokens_tensor, target_logits_tensor, drafts_tensor, candidate_ids_tensor,
+        proposal_q_tensor, extents_tensor, lengths_tensor, anchors_tensor, licensed_tensor,
+        licensed_counts_tensor, accepted_tensor, token_domain,
+        static_cast<const ops::SamplingConfig*>(d_verifier_config.p),
+        {.all_rows_greedy_without_penalties = false}, sparse_workspace, nullptr);
+    cuda_synchronize();
+
+    failures += verify_exact("generated-q residual licensed prefix",
+                             read<int>(d_licensed, columns),
+                             std::vector<int>{first_draft, correction, 0});
+    failures += verify_exact("generated-q residual licensed count", read<int>(d_licensed_counts, 1), {2});
+    failures += verify_exact("generated-q residual accepted drafts", read<int>(d_accepted, 1), {1});
+    failures += verify_exact("generated-q committed length", read<int>(d_lengths, 1),
+                             {initial_length + 2});
+    failures += verify_exact("generated-q committed anchor", read<int>(d_anchors, 1), {correction});
+    failures += verify_exact("generated-q target tokens readonly",
+                             read<int>(d_target_tokens, columns), target_tokens);
+    failures += verify_exact("generated-q candidate ids readonly",
+                             read<int>(d_candidate_ids, candidate_ids.size()), candidate_ids);
+    failures += verify_exact("generated-q distribution readonly",
+                             read<float>(d_proposal_q, proposal_q.size()), proposal_q);
+    failures += d_target_tokens.verify_guards("generated-q target tokens");
+    failures += d_lengths.verify_guards("generated-q committed length");
+    failures += d_anchors.verify_guards("generated-q committed anchor");
+    failures += d_licensed.verify_guards("generated-q licensed prefix");
+    failures += d_licensed_counts.verify_guards("generated-q licensed count");
+    failures += d_accepted.verify_guards("generated-q accepted drafts");
+    failures += scratch.verify_guards("generated-q sparse workspace");
+    return failures;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1260,6 +1574,10 @@ int main(int argc, char** argv) {
             ++failures;
         } catch (const std::invalid_argument&) {}
     }
+    failures += SparseAcceptSuite(1, 1).sparse_greedy_direct_case(0, true, true);
+    failures += sparse_small_width20_greedy_logits_case();
+    failures += generated_mtp_q_sparse_rejection_case();
+
     for (int k : {1, 7, 15}) {
         SparseAcceptSuite suite(k, 8);
         failures += suite.sparse_general_mixed_case();

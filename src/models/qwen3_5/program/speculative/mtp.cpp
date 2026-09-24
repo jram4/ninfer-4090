@@ -85,6 +85,7 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                          {}, state.execution.linear_attention, state.execution.io,
                          state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
                          &state.text_cache, &state.mtp_cache);
+        card.set_sampling(frame.sampling);
         Tensor anchors            = frame.anchors.slice(0, 0, batch_size);
         Tensor frontiers          = frame.base_frontiers.slice(0, 0, batch_size);
         Tensor budgets            = frame.remaining_budgets.slice(0, 0, batch_size);
@@ -115,6 +116,10 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
         Tensor ar_rope_positions  = frame.ar_rope_positions.slice(0, 0, batch_size);
         Tensor ar_valid_columns   = frame.ar_valid_columns.slice(0, 0, batch_size);
         Tensor next_drafts        = frame.next_drafts.slice(0, 0, batch_size);
+        Tensor candidate_ids      = frame.candidate_ids.slice(2, 0, batch_size);
+        Tensor proposal_q         = frame.proposal_q.slice(2, 0, batch_size);
+        Tensor next_candidate_ids = frame.next_candidate_ids.slice(2, 0, batch_size);
+        Tensor next_proposal_q    = frame.next_proposal_q.slice(2, 0, batch_size);
 
         ops::speculative_prepare_verify_inputs(anchors, current_drafts, frontiers, current_extents,
                                                verify_ids, target_positions,
@@ -136,6 +141,8 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                                      .target_tokens           = target_tokens,
                                      .drafts                  = current_drafts,
                                      .current_extents         = current_extents,
+                                     .candidate_ids           = candidate_ids,
+                                     .proposal_q              = proposal_q,
                                      .frontiers               = frontiers,
                                      .anchors                 = anchors,
                                      .licensed_tokens         = licensed_tokens,
@@ -164,7 +171,10 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
 
             Tensor proposal_logits = frame.proposal_logits.slice(1, 0, batch_size);
             Tensor draft0          = next_drafts.slice(1, 0, 1).view({batch_size});
-            card.mtp_propose_batch(ar_hidden, proposal_logits, draft0);
+            Tensor first_position  = ar_positions.slice(1, 0, 1).view({batch_size});
+            card.mtp_propose_batch(ar_hidden, proposal_logits, draft0, next_candidate_ids,
+                                   next_proposal_q, 0, first_position, licensed_tokens,
+                                   licensed_counts, next_drafts, 0, 0);
             for (std::uint32_t step = 0; step + 1 < k; ++step) {
                 Tensor previous =
                     next_drafts.slice(1, static_cast<std::int32_t>(step), 1).view({batch_size});
@@ -185,7 +195,12 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                      batch_size});
                 card.mtp_forward_decode_batch(previous_batch, hidden_batch, position, rope, valid,
                                               mtp_rows, envelopes.ar[step], next_hidden_batch);
-                card.mtp_propose_batch(next_hidden, proposal_logits, next);
+                Tensor proposal_position = ar_positions.slice(1, static_cast<std::int32_t>(step), 1)
+                                               .view({batch_size});
+                card.mtp_propose_batch(next_hidden, proposal_logits, next, next_candidate_ids,
+                                       next_proposal_q, static_cast<std::int32_t>(step + 1),
+                                       proposal_position, licensed_tokens, licensed_counts,
+                                       next_drafts, static_cast<std::int32_t>(step + 1), 1);
                 CUDA_CHECK(cudaMemcpyAsync(ar_hidden.data, next_hidden.data, ar_hidden.bytes(),
                                            cudaMemcpyDeviceToDevice,
                                            state.execution.device.stream));

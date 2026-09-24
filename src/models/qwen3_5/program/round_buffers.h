@@ -16,6 +16,7 @@
 namespace ninfer::models::qwen3_5 {
 
 inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 10;
+inline constexpr std::uint32_t kMtpProposalCandidates     = ops::kSamplingCandidateCapacity;
 inline constexpr std::uint32_t kMtpDecodeMaximumWidth     = kMtpDecodeMaximumDrafts + 1;
 inline constexpr std::uint32_t kDFlashDecodeMaximumDrafts = 15;
 inline constexpr std::uint32_t kDFlashDecodeMaximumWidth  = kDFlashDecodeMaximumDrafts + 1;
@@ -54,6 +55,11 @@ struct MtpDecodeIngress {
     std::array<std::int32_t, kMaximumConcurrency> current_extents{};
     std::array<std::int32_t, kMaximumConcurrency> target_valid_columns{};
     std::array<TokenId, kMaximumConcurrency * kMtpDecodeMaximumDrafts> current_drafts{};
+    // Per-request, per-position sparse q support, laid out as [candidate,step,row].
+    std::array<TokenId, kMaximumConcurrency * kMtpDecodeMaximumDrafts * kMtpProposalCandidates>
+        current_candidate_ids{};
+    std::array<float, kMaximumConcurrency * kMtpDecodeMaximumDrafts * kMtpProposalCandidates>
+        current_proposal_q{};
     std::array<std::int32_t, kMaximumConcurrency * kMtpDecodeMaximumWidth> target_rope_positions{};
     std::array<std::int32_t, kMaximumConcurrency> text_kv_table_rows{};
     std::array<std::int32_t, kMaximumConcurrency> mtp_kv_table_rows{};
@@ -69,6 +75,10 @@ struct MtpDecodeEgress {
     std::array<std::int32_t, kMaximumConcurrency> accepted_drafts{};
     // Step-major: all B rows for proposal step 0, followed by all B rows for step 1, etc.
     std::array<TokenId, kMaximumConcurrency * kMtpDecodeMaximumDrafts> next_drafts{};
+    std::array<TokenId, kMaximumConcurrency * kMtpDecodeMaximumDrafts * kMtpProposalCandidates>
+        next_candidate_ids{};
+    std::array<float, kMaximumConcurrency * kMtpDecodeMaximumDrafts * kMtpProposalCandidates>
+        next_proposal_q{};
     std::array<std::int32_t, kMaximumConcurrency> next_extents{};
 };
 
@@ -225,6 +235,8 @@ struct MtpDecodeState {
     Tensor current_extents;
     Tensor target_valid_columns;
     Tensor current_drafts;
+    Tensor candidate_ids;
+    Tensor proposal_q;
     Tensor target_rope_positions;
     Tensor text_kv_table_rows;
     Tensor mtp_kv_table_rows;
@@ -236,6 +248,8 @@ struct MtpDecodeState {
     Tensor licensed_counts;
     Tensor accepted_drafts;
     Tensor next_drafts;
+    Tensor next_candidate_ids;
+    Tensor next_proposal_q;
     Tensor next_extents;
     Tensor verify_ids;
     Tensor target_positions;

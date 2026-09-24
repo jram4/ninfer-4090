@@ -140,13 +140,27 @@ public:
                              const Tensor& rope_positions, const Tensor& valid_columns,
                              const Tensor& kv_table_rows, const Tensor& linear_state_source_slots,
                              ops::CausalAttentionExecutionEnvelope envelope, Tensor& hidden,
+                             Tensor& logits);
+    void target_verify_batch(const Tensor& ids, const Tensor& cache_positions,
+                             const Tensor& rope_positions, const Tensor& valid_columns,
+                             const Tensor& kv_table_rows, const Tensor& linear_state_source_slots,
+                             ops::CausalAttentionExecutionEnvelope envelope, Tensor& hidden,
                              Tensor& logits, Tensor& target_tokens, DFlashFeatureSink& sink);
+    void target_verify_batch(const Tensor& ids, const Tensor& cache_positions,
+                             const Tensor& rope_positions, const Tensor& valid_columns,
+                             const Tensor& kv_table_rows, const Tensor& linear_state_source_slots,
+                             ops::CausalAttentionExecutionEnvelope envelope, Tensor& hidden,
+                             Tensor& logits, DFlashFeatureSink& sink);
     void mtp_forward_decode_batch(const Tensor& ids, const Tensor& hidden,
                                   const Tensor& cache_positions, const Tensor& rope_positions,
                                   const Tensor& valid_columns, const Tensor& kv_table_rows,
                                   ops::CausalAttentionExecutionEnvelope envelope,
                                   Tensor& mtp_hidden);
-    void mtp_propose_batch(const Tensor& hidden, Tensor& logits, Tensor& draft_tokens);
+    void mtp_propose_batch(const Tensor& hidden, Tensor& logits, Tensor& draft_tokens,
+                           Tensor& candidate_ids, Tensor& proposal_q, std::int32_t proposal_step,
+                           const Tensor& logical_positions, const Tensor& round_tokens,
+                           const Tensor& round_counts, const Tensor& prior_proposals,
+                           std::int32_t prior_count, std::int32_t position_step);
     void mtp_forward_batch(const Tensor& ids, const Tensor& hidden, const Tensor& positions,
                            ops::CausalAttentionExecutionEnvelope envelope, Tensor& mtp_hidden,
                            int logits_column, Tensor* logits, Tensor* draft_token,
@@ -174,7 +188,7 @@ private:
                                   const Tensor& kv_table_rows,
                                   const Tensor& linear_state_source_slots,
                                   ops::CausalAttentionExecutionEnvelope envelope, Tensor& hidden,
-                                  Tensor& logits, Tensor& target_tokens, Tap& tap);
+                                  Tensor& logits, Tensor* target_tokens, Tap& tap);
 
     void mtp_forward_stem(const Tensor& ids, const Tensor& hidden, const Tensor* input_embeddings,
                           Tensor& x, Tensor& ah);
@@ -190,6 +204,12 @@ private:
                            ops::CausalAttentionExecutionEnvelope envelope, bool final_chunk,
                            Tensor* final_hidden, Tensor* logits, Tensor* draft_token);
     void proposal_argmax(const Tensor& hidden, Tensor& logits, Tensor& proposal_tokens);
+    void proposal_sample_mtp(const Tensor& hidden, Tensor& logits, Tensor& proposal_tokens,
+                             Tensor& candidate_ids, Tensor& proposal_q,
+                             std::int32_t proposal_step, const Tensor& logical_positions,
+                             const Tensor& round_tokens, const Tensor& round_counts,
+                             const Tensor& prior_proposals, std::int32_t prior_count,
+                             std::int32_t position_step);
 
     struct MultimodalPrefill {
         std::span<const int> token_ids;

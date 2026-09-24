@@ -590,6 +590,39 @@ void TextContext::proposal_argmax(const Tensor& hidden, Tensor& logits, Tensor& 
     }
 }
 
+void TextContext::proposal_sample_mtp(
+    const Tensor& hidden, Tensor& logits, Tensor& proposal_tokens, Tensor& candidate_ids,
+    Tensor& proposal_q, std::int32_t proposal_step, const Tensor& logical_positions,
+    const Tensor& round_tokens, const Tensor& round_counts, const Tensor& prior_proposals,
+    std::int32_t prior_count, std::int32_t position_step) {
+    if (sampling_config_ == nullptr) {
+        throw std::logic_error("MTP proposal sampling has no sampling configuration");
+    }
+    const int batch = hidden.ne[1];
+    require_tensor_shape(hidden, DType::BF16, {dimension(config_.hidden_size), batch},
+                         "MTP sampled proposal hidden");
+    require_tensor_shape(logits, DType::BF16, {dimension(config_.vocab_size), batch},
+                         "MTP sampled proposal logits");
+    require_tensor_shape(proposal_tokens, DType::I32, {batch}, "MTP sampled proposal tokens");
+    auto proposal_scope = work_.scope();
+    const int token_domain = dimension(parameters_.model.resources().public_token_count);
+    if (proposal_head_ != nullptr) {
+        Tensor proposal_logits = work_.alloc(DType::BF16, {proposal_head_n_, batch});
+        project(hidden, *proposal_head_, proposal_logits, work_, ctx_.stream);
+        ops::sample_mtp_proposal(
+            proposal_logits, proposal_tokens, candidate_ids, proposal_q, token_domain,
+            proposal_head_ids_, sampling_config_, logical_positions, round_tokens, round_counts,
+            prior_proposals, prior_count, proposal_step, position_step, work_, ctx_.stream);
+    } else {
+        Tensor output_logits = matrix_window(logits, batch);
+        project(hidden, mtp_->output_head, output_logits, work_, ctx_.stream);
+        ops::sample_mtp_proposal(output_logits, proposal_tokens, candidate_ids, proposal_q,
+                                 token_domain, nullptr, sampling_config_, logical_positions,
+                                 round_tokens, round_counts, prior_proposals, prior_count,
+                                 proposal_step, position_step, work_, ctx_.stream);
+    }
+}
+
 void TextContext::mtp_forward_batch(const Tensor& ids, const Tensor& hidden,
                                     const Tensor& positions,
                                     ops::CausalAttentionExecutionEnvelope envelope,
@@ -715,7 +748,7 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
                                            const Tensor& valid_columns, const Tensor& kv_table_rows,
                                            const Tensor& linear_state_source_slots,
                                            ops::CausalAttentionExecutionEnvelope envelope,
-                                           Tensor& hidden, Tensor& logits, Tensor& target_tokens,
+                                           Tensor& hidden, Tensor& logits, Tensor* target_tokens,
                                            Tap& tap) {
     const std::int32_t width = ids.ne[0];
     const std::int32_t batch = ids.ne[1];
@@ -737,7 +770,10 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
                          "target verify batch hidden");
     require_tensor_shape(logits, DType::BF16, {dimension(config_.vocab_size), width, batch},
                          "target verify batch logits");
-    require_tensor_shape(target_tokens, DType::I32, {width, batch}, "target verify batch tokens");
+    if (target_tokens != nullptr) {
+        require_tensor_shape(*target_tokens, DType::I32, {width, batch},
+                             "target verify batch tokens");
+    }
 
     cudaStream_t stream = ctx_.stream;
     work_.reset();
@@ -762,11 +798,13 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
         }
         Tensor flat_hidden = hidden.view({dimension(config_.hidden_size), columns});
         Tensor flat_logits = logits.view({dimension(config_.vocab_size), columns});
-        Tensor flat_tokens = target_tokens.view({columns});
         ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, flat_hidden, stream);
         project(flat_hidden, *lm_head_, flat_logits, work_, stream);
-        ops::argmax(flat_logits, flat_tokens,
-                    dimension(parameters_.model.resources().public_token_count), stream);
+        if (target_tokens != nullptr) {
+            Tensor flat_tokens = target_tokens->view({columns});
+            ops::argmax(flat_logits, flat_tokens,
+                        dimension(parameters_.model.resources().public_token_count), stream);
+        }
     }
     work_.reset();
 }
@@ -779,8 +817,19 @@ void TextContext::target_verify_batch(const Tensor& ids, const Tensor& cache_pos
                                       Tensor& hidden, Tensor& logits, Tensor& target_tokens) {
     NullTap tap;
     target_verify_batch_impl(ids, cache_positions, rope_positions, valid_columns, kv_table_rows,
-                             linear_state_source_slots, envelope, hidden, logits, target_tokens,
+                             linear_state_source_slots, envelope, hidden, logits, &target_tokens,
                              tap);
+}
+
+void TextContext::target_verify_batch(const Tensor& ids, const Tensor& cache_positions,
+                                      const Tensor& rope_positions, const Tensor& valid_columns,
+                                      const Tensor& kv_table_rows,
+                                      const Tensor& linear_state_source_slots,
+                                      ops::CausalAttentionExecutionEnvelope envelope,
+                                      Tensor& hidden, Tensor& logits) {
+    NullTap tap;
+    target_verify_batch_impl(ids, cache_positions, rope_positions, valid_columns, kv_table_rows,
+                             linear_state_source_slots, envelope, hidden, logits, nullptr, tap);
 }
 
 void TextContext::target_verify_batch(const Tensor& ids, const Tensor& cache_positions,
@@ -791,8 +840,18 @@ void TextContext::target_verify_batch(const Tensor& ids, const Tensor& cache_pos
                                       Tensor& hidden, Tensor& logits, Tensor& target_tokens,
                                       DFlashFeatureSink& sink) {
     target_verify_batch_impl(ids, cache_positions, rope_positions, valid_columns, kv_table_rows,
-                             linear_state_source_slots, envelope, hidden, logits, target_tokens,
+                             linear_state_source_slots, envelope, hidden, logits, &target_tokens,
                              sink);
+}
+
+void TextContext::target_verify_batch(const Tensor& ids, const Tensor& cache_positions,
+                                      const Tensor& rope_positions, const Tensor& valid_columns,
+                                      const Tensor& kv_table_rows,
+                                      const Tensor& linear_state_source_slots,
+                                      ops::CausalAttentionExecutionEnvelope envelope,
+                                      Tensor& hidden, Tensor& logits, DFlashFeatureSink& sink) {
+    target_verify_batch_impl(ids, cache_positions, rope_positions, valid_columns, kv_table_rows,
+                             linear_state_source_slots, envelope, hidden, logits, nullptr, sink);
 }
 
 void TextContext::mtp_forward_decode_batch(const Tensor& ids, const Tensor& hidden,
@@ -827,14 +886,20 @@ void TextContext::mtp_forward_decode_batch(const Tensor& ids, const Tensor& hidd
     mtp_forward_core(ids, hidden, cache_positions, rope_positions, envelope, mtp_hidden, nullptr);
 }
 
-void TextContext::mtp_propose_batch(const Tensor& hidden, Tensor& logits, Tensor& draft_tokens) {
+void TextContext::mtp_propose_batch(
+    const Tensor& hidden, Tensor& logits, Tensor& draft_tokens, Tensor& candidate_ids,
+    Tensor& proposal_q, std::int32_t proposal_step, const Tensor& logical_positions,
+    const Tensor& round_tokens, const Tensor& round_counts, const Tensor& prior_proposals,
+    std::int32_t prior_count, std::int32_t position_step) {
     const std::int32_t batch = hidden.ne[1];
     require_tensor_shape(hidden, DType::BF16, {dimension(config_.hidden_size), batch},
                          "MTP proposal batch hidden");
     require_tensor_shape(logits, DType::BF16, {dimension(config_.vocab_size), batch},
                          "MTP proposal batch logits");
     require_tensor_shape(draft_tokens, DType::I32, {batch}, "MTP proposal batch tokens");
-    proposal_argmax(hidden, logits, draft_tokens);
+    proposal_sample_mtp(hidden, logits, draft_tokens, candidate_ids, proposal_q, proposal_step,
+                        logical_positions, round_tokens, round_counts, prior_proposals,
+                        prior_count, position_step);
 }
 
 void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase ph) {
