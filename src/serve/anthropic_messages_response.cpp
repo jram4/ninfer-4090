@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <iterator>
@@ -57,8 +58,10 @@ struct StopPresentation {
     Json sequence      = nullptr;
 };
 
-StopPresentation stop_presentation(const GenerationOutcome& outcome) {
-    if (!outcome.tool_calls.empty()) { return StopPresentation{.reason = "tool_use"}; }
+StopPresentation stop_presentation(const GenerationOutcome& outcome, bool honor_tool_calls = true) {
+    if (honor_tool_calls && !outcome.tool_calls.empty()) {
+        return StopPresentation{.reason = "tool_use"};
+    }
     switch (outcome.finish_reason) {
     case ninfer::FinishReason::OutputLimit:
         return StopPresentation{.reason = "max_tokens"};
@@ -77,6 +80,40 @@ StopPresentation stop_presentation(const GenerationOutcome& outcome) {
         throw std::logic_error("cancelled generation cannot be serialized as an Anthropic message");
     }
     throw std::logic_error("unknown Engine finish reason");
+}
+
+std::string structured_title_json(std::string_view generated) {
+    std::string candidate(generated);
+    const auto not_space = [](unsigned char value) { return std::isspace(value) == 0; };
+    const auto first = std::find_if(candidate.begin(), candidate.end(), not_space);
+    const auto last  = std::find_if(candidate.rbegin(), candidate.rend(), not_space).base();
+    candidate = first < last ? std::string(first, last) : std::string{};
+
+    if (candidate.starts_with("```")) {
+        const std::size_t first_line = candidate.find('\n');
+        if (first_line != std::string::npos && candidate.size() >= first_line + 4U &&
+            candidate.ends_with("```")) {
+            candidate = candidate.substr(first_line + 1U, candidate.size() - first_line - 4U);
+            const auto inner_first = std::find_if(candidate.begin(), candidate.end(), not_space);
+            const auto inner_last =
+                std::find_if(candidate.rbegin(), candidate.rend(), not_space).base();
+            candidate = inner_first < inner_last ? std::string(inner_first, inner_last)
+                                                 : std::string{};
+        }
+    }
+
+    const Json parsed = Json::parse(candidate, nullptr, false);
+    std::string title = candidate;
+    if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("title") &&
+        parsed.at("title").is_string()) {
+        title = parsed.at("title").get<std::string>();
+    } else if (!parsed.is_discarded() && parsed.is_string()) {
+        title = parsed.get<std::string>();
+    }
+
+    // Projection to this single string field guarantees the supported JSON Schema even when the
+    // model returns plain text, a fenced object, or an object with unsupported extra fields.
+    return Json{{"title", std::move(title)}}.dump();
 }
 
 Json final_usage(const GenerationOutcome& outcome) {
@@ -217,8 +254,9 @@ std::string make_anthropic_count_tokens_response(int input_tokens) {
 }
 
 AnthropicMessagesStream::AnthropicMessagesStream(AnthropicResponseIdentity identity,
-                                                 int input_tokens)
-    : identity_(std::move(identity)), input_tokens_(input_tokens) {}
+                                                 int input_tokens, bool structured_title)
+    : identity_(std::move(identity)), input_tokens_(input_tokens),
+      structured_title_(structured_title) {}
 
 std::string AnthropicMessagesStream::start() { return start_with_cache(std::nullopt); }
 
@@ -244,7 +282,7 @@ std::string AnthropicMessagesStream::start_with_cache(std::optional<int> cache_r
 }
 
 std::vector<std::string> AnthropicMessagesStream::reasoning_delta(const std::string& text) {
-    if (!started_ || finished_ || text_open_) {
+    if (!started_ || finished_ || text_open_ || (structured_title_ && !content_.empty())) {
         throw std::logic_error("invalid Anthropic reasoning delta state");
     }
     std::vector<std::string> events;
@@ -285,6 +323,10 @@ std::vector<std::string> AnthropicMessagesStream::close_thinking() {
 
 std::vector<std::string> AnthropicMessagesStream::content_delta(const std::string& text) {
     if (!started_ || finished_) { throw std::logic_error("invalid Anthropic text delta state"); }
+    if (structured_title_) {
+        content_ += text;
+        return {};
+    }
     std::vector<std::string> events = close_thinking();
     if (!text_open_) {
         text_index_ = next_index_++;
@@ -319,36 +361,59 @@ std::vector<std::string> AnthropicMessagesStream::finish(const GenerationOutcome
     std::vector<std::string> events;
     const std::string reasoning_suffix = outcome.reasoning.substr(reasoning_.size());
     if (!reasoning_suffix.empty()) {
-        if (text_open_) {
+        if (text_open_ || (structured_title_ && !content_.empty())) {
             throw std::logic_error("terminal Anthropic reasoning appeared after streamed text");
         }
         append(events, reasoning_delta(reasoning_suffix));
     }
-    const std::string content_suffix = outcome.text.substr(content_.size());
-    if (!content_suffix.empty()) { append(events, content_delta(content_suffix)); }
-    append(events, close_thinking());
-    append(events, close_text());
-
-    for (const ToolCall& call : materialize_tool_calls(outcome)) {
-        (void)parse_tool_input(call);
-        const int index = next_index_++;
-        events.push_back(
-            event("content_block_start", Json{{"type", "content_block_start"},
-                                              {"index", index},
-                                              {"content_block", Json{{"type", "tool_use"},
-                                                                     {"id", call.id},
-                                                                     {"name", call.name},
-                                                                     {"input", Json::object()}}}}));
+    if (structured_title_) {
+        if (outcome.text.empty() && !outcome.tool_calls.empty()) {
+            throw std::logic_error(
+                "structured title generation returned a tool call without title text");
+        }
+        append(events, close_thinking());
+        const std::string json_title = structured_title_json(outcome.text);
+        text_index_                 = next_index_++;
+        text_open_                  = true;
+        events.push_back(event("content_block_start",
+                               Json{{"type", "content_block_start"},
+                                    {"index", text_index_},
+                                    {"content_block", Json{{"type", "text"}, {"text", ""}}}}));
         events.push_back(event("content_block_delta",
                                Json{{"type", "content_block_delta"},
-                                    {"index", index},
-                                    {"delta", Json{{"type", "input_json_delta"},
-                                                   {"partial_json", call.arguments_json}}}}));
-        events.push_back(
-            event("content_block_stop", Json{{"type", "content_block_stop"}, {"index", index}}));
+                                    {"index", text_index_},
+                                    {"delta", Json{{"type", "text_delta"},
+                                                  {"text", json_title}}}}));
+    } else {
+        const std::string content_suffix = outcome.text.substr(content_.size());
+        if (!content_suffix.empty()) { append(events, content_delta(content_suffix)); }
+        append(events, close_thinking());
+    }
+    append(events, close_text());
+
+    if (!structured_title_) {
+        for (const ToolCall& call : materialize_tool_calls(outcome)) {
+            (void)parse_tool_input(call);
+            const int index = next_index_++;
+            events.push_back(
+                event("content_block_start", Json{{"type", "content_block_start"},
+                                                  {"index", index},
+                                                  {"content_block", Json{{"type", "tool_use"},
+                                                                          {"id", call.id},
+                                                                          {"name", call.name},
+                                                                          {"input", Json::object()}}}}));
+        events.push_back(event("content_block_delta",
+                                   Json{{"type", "content_block_delta"},
+                                        {"index", index},
+                                        {"delta", Json{{"type", "input_json_delta"},
+                                                       {"partial_json", call.arguments_json}}}}));
+            events.push_back(
+                event("content_block_stop", Json{{"type", "content_block_stop"},
+                                                  {"index", index}}));
+        }
     }
 
-    const StopPresentation stop = stop_presentation(outcome);
+    const StopPresentation stop = stop_presentation(outcome, !structured_title_);
     events.push_back(event("message_delta", Json{{"type", "message_delta"},
                                                  {"delta", Json{{"stop_reason", stop.reason},
                                                                 {"stop_sequence", stop.sequence}}},

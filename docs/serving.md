@@ -684,7 +684,19 @@ remains usable across serve restarts.
 `display:"omitted"` is rejected because NInfer cannot provide Anthropic's
 encrypted hidden-reasoning restore semantics. `preserve_thinking` remains a NInfer extension for
 closed-turn reasoning history. `output_config.effort` passes its protocol-validated value to the
-selected template.
+selected template. The maintained Qwen3.8 template maps `high` to its `xhigh` instructions.
+
+`output_config.format` supports only the observed streaming title schema: an object with one required
+string property named `title` and `additionalProperties:false`, with `stream:true` and
+`output_config.effort:"high"`. Other schemas and combinations are rejected. Since the Engine does not
+provide constrained decoding, this narrow adapter buffers model text and emits a single JSON text
+block containing only `title`; a valid generated `{title: string}` object or JSON string literal is
+projected to that field, and other text is used as the title string. Supplied tool definitions are accepted but disabled for
+title generation; a tool-call-only outcome is returned as an explicit stream error. This guarantees
+the response shape but does not guarantee title quality or constrain the model's internal generation.
+Structured streaming retains Engine token
+usage and timing; the usage count describes generated tokens, while the returned JSON wrapper is not
+retokenized.
 
 User-defined, non-strict tools support `name`, `description`, object `input_schema`, and
 `input_examples`. `tool_choice:auto` and `none` are executable. Forced or named choice,

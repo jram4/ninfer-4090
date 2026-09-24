@@ -133,7 +133,8 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
 
     try {
         auto stream  = std::make_shared<HttpGenerationStream>(std::move(prepared));
-        auto encoder = std::make_shared<AnthropicMessagesStream>(identity, input_tokens);
+        auto encoder = std::make_shared<AnthropicMessagesStream>(
+            identity, input_tokens, request.structured_title);
 
         prepare_sse_response(res);
         res.set_chunked_content_provider(
