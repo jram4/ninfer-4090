@@ -13,6 +13,7 @@ import math
 import os
 import platform
 import statistics
+import struct
 import subprocess
 import sys
 import time
@@ -560,11 +561,15 @@ def validate_server_start(
         raise HarnessError("Serve is not running on an RTX 4090")
     if (environment.get("compute_capability_major"), environment.get("compute_capability_minor")) != (8, 9):
         raise HarnessError("Serve GPU compute capability is not 8.9")
-    overrides = event.get("sampling_defaults", {}).get("server_overrides", {})
-    for name, expected_value in SAMPLING.items():
-        if overrides.get(name) != expected_value:
-            raise HarnessError(f"Serve sampling override changed for {name}")
-    if event.get("sampling_defaults", {}).get("greedy") is not False:
+    sampling_defaults = event.get("sampling_defaults")
+    if not isinstance(sampling_defaults, dict):
+        raise HarnessError("Serve sampling defaults are missing or malformed")
+    _validate_sampling_values(
+        sampling_defaults.get("server_overrides"),
+        {**SAMPLING, "seed": None},
+        "Serve sampling override",
+    )
+    if sampling_defaults.get("greedy") is not False:
         raise HarnessError("Serve is not using positive-temperature sampling")
     return {
         "server_instance_id": event.get("server_instance_id"),
@@ -593,8 +598,38 @@ def validate_request_start(event: dict[str, Any], payload: dict[str, Any]) -> No
         raise HarnessError("request tool count drifted")
     if request.get("tool_choice") != payload["tool_choice"]:
         raise HarnessError("request tool choice drifted")
-    if request.get("sampling") != {**SAMPLING, "seed": payload["seed"]}:
-        raise HarnessError("resolved request sampling parameters or seed changed")
+    _validate_sampling_values(
+        request.get("sampling"),
+        {**SAMPLING, "seed": payload["seed"]},
+        "resolved request sampling parameter",
+    )
+
+
+def _validate_sampling_values(
+    actual: Any, expected: dict[str, Any], description: str
+) -> None:
+    """Match telemetry exactly, allowing only Python-literal to serialized-FP32 conversion."""
+    if not isinstance(actual, dict):
+        raise HarnessError(f"{description}s are missing or malformed")
+    if actual.keys() != expected.keys():
+        missing = expected.keys() - actual.keys()
+        unexpected = actual.keys() - expected.keys()
+        raise HarnessError(
+            f"{description} fields changed (missing={missing!r}, unexpected={unexpected!r})"
+        )
+
+    for name, expected_value in expected.items():
+        actual_value = actual[name]
+        if type(expected_value) is float:
+            if type(actual_value) is not float or not math.isfinite(actual_value):
+                raise HarnessError(f"{description} changed for {name}")
+            # Sampler settings enter the runtime as float32, then JSON exposes that exact
+            # value as a decimal number. Match its exact promoted value; add no tolerance.
+            expected_fp32 = struct.unpack("!f", struct.pack("!f", expected_value))[0]
+            if struct.pack("!d", actual_value) != struct.pack("!d", expected_fp32):
+                raise HarnessError(f"{description} changed for {name}")
+        elif type(actual_value) is not type(expected_value) or actual_value != expected_value:
+            raise HarnessError(f"{description} changed for {name}")
 
 
 def _quality_facts(case: Case, response: dict[str, Any], request_done: dict[str, Any]) -> dict[str, Any]:
@@ -681,8 +716,11 @@ def _validate_done(
         raise HarnessError("request_start and request_done identities differ")
     validate_request_start(request_start, payload)
     request = request_done.get("request", {})
-    if request.get("sampling") != {**SAMPLING, "seed": payload["seed"]}:
-        raise HarnessError("request_done sampler or seed changed")
+    _validate_sampling_values(
+        request.get("sampling"),
+        {**SAMPLING, "seed": payload["seed"]},
+        "request_done sampling parameter",
+    )
     if request.get("requested_output_tokens") != payload["max_completion_tokens"]:
         raise HarnessError("request_done output cap changed")
     if request.get("enable_thinking") is not payload["enable_thinking"]:

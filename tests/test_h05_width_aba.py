@@ -23,6 +23,15 @@ def _gpu(temperature=65, clock=2500):
     }
 
 
+def _sampling_telemetry(seed):
+    return {
+        **H05.SAMPLING,
+        "temperature": 0.6000000238418579,
+        "top_p": 0.949999988079071,
+        "seed": seed,
+    }
+
+
 def _rows_by_arm(*, k7_decode_seconds=0.82, k7_rounds=27, k3_decode_seconds=1.0,
                  k3_rounds=30, k7_b_decode_seconds=None, k7_b_rounds=None,
                  k7_completion_tokens=None, k7_b_completion_tokens=None):
@@ -99,7 +108,7 @@ def _server_start(artifact_path, artifact_size, width, port=18082):
         "engine": engine,
         "sampling_defaults": {
             "greedy": False,
-            "server_overrides": {**H05.SAMPLING, "seed": None},
+            "server_overrides": _sampling_telemetry(None),
         },
         "environment": {
             "gpu_name": "NVIDIA GeForce RTX 4090",
@@ -202,6 +211,116 @@ class H05ValidationTest(unittest.TestCase):
                     port=18082,
                 )
 
+    def test_server_start_accepts_exact_serialized_fp32_sampling_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "model.ninfer"
+            artifact.write_bytes(b"public fixture artifact marker")
+            event = _server_start(artifact, artifact.stat().st_size, 7)
+            event["sampling_defaults"]["server_overrides"].update(
+                temperature=0.6000000238418579,
+                top_p=0.949999988079071,
+            )
+
+            result = H05.validate_server_start(
+                event,
+                artifact=artifact,
+                artifact_size=artifact.stat().st_size,
+                draft_tokens=7,
+                port=18082,
+            )
+
+        self.assertEqual(
+            result["sampling_defaults"]["server_overrides"]["temperature"],
+            0.6000000238418579,
+        )
+        self.assertEqual(
+            result["sampling_defaults"]["server_overrides"]["top_p"],
+            0.949999988079071,
+        )
+
+    def test_server_start_rejects_sampling_drift_and_malformed_telemetry(self):
+        invalid_overrides = (
+            ("material temperature drift", {"temperature": 0.61}),
+            ("unexplained close temperature value", {"temperature": 0.60000003}),
+            ("material top-p drift", {"top_p": 0.96}),
+            ("string temperature", {"temperature": "0.6"}),
+            ("boolean temperature", {"temperature": True}),
+            ("NaN temperature", {"temperature": float("nan")}),
+            ("infinite top-p", {"top_p": float("inf")}),
+            ("null top-p", {"top_p": None}),
+            ("integer encoded as float", {"top_k": 20.0}),
+            ("discrete top-k drift", {"top_k": 21}),
+            ("unexpected seed", {"seed": 1}),
+            ("unexpected field", {"extra": 0}),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "model.ninfer"
+            artifact.write_bytes(b"public fixture artifact marker")
+            for description, changes in invalid_overrides:
+                with self.subTest(description=description):
+                    event = _server_start(artifact, artifact.stat().st_size, 7)
+                    event["sampling_defaults"]["server_overrides"].update(changes)
+                    with self.assertRaises(H05.HarnessError):
+                        H05.validate_server_start(
+                            event,
+                            artifact=artifact,
+                            artifact_size=artifact.stat().st_size,
+                            draft_tokens=7,
+                            port=18082,
+                        )
+
+            for description, field in (
+                ("missing temperature", "temperature"),
+                ("missing discrete setting", "top_k"),
+            ):
+                with self.subTest(description=description):
+                    event = _server_start(artifact, artifact.stat().st_size, 7)
+                    del event["sampling_defaults"]["server_overrides"][field]
+                    with self.assertRaises(H05.HarnessError):
+                        H05.validate_server_start(
+                            event,
+                            artifact=artifact,
+                            artifact_size=artifact.stat().st_size,
+                            draft_tokens=7,
+                            port=18082,
+                        )
+
+            event = _server_start(artifact, artifact.stat().st_size, 7)
+            event["sampling_defaults"]["server_overrides"] = []
+            with self.assertRaisesRegex(H05.HarnessError, "missing or malformed"):
+                H05.validate_server_start(
+                    event,
+                    artifact=artifact,
+                    artifact_size=artifact.stat().st_size,
+                    draft_tokens=7,
+                    port=18082,
+                )
+
+    def test_request_start_accepts_fp32_sampling_values_and_keeps_seed_exact(self):
+        case = H05.load_cases()[0][0]
+        payload = H05.request_payload(case, H05.SEEDS[0])
+        event = {
+            "artifact_type": H05.SERVER_LOG_ARTIFACT,
+            "schema_version": H05.SERVER_LOG_SCHEMA,
+            "event": "request_start",
+            "request": {
+                "protocol": "openai_chat_completions",
+                "model": payload["model"],
+                "stream": False,
+                "requested_output_tokens": payload["max_completion_tokens"],
+                "requested_output_tokens_source": "client",
+                "enable_thinking": payload["enable_thinking"],
+                "tool_count": len(payload["tools"]),
+                "tool_choice": payload["tool_choice"],
+                "sampling": _sampling_telemetry(payload["seed"]),
+            },
+        }
+
+        H05.validate_request_start(event, payload)
+        event["request"]["sampling"]["seed"] += 1
+        with self.assertRaisesRegex(H05.HarnessError, "changed for seed"):
+            H05.validate_request_start(event, payload)
+
     def test_tool_quality_checks_structured_call_without_retaining_arguments(self):
         cases, _ = H05.load_cases()
         tool = cases[1]
@@ -259,7 +378,7 @@ class H05ValidationTest(unittest.TestCase):
                 "enable_thinking": False,
                 "tool_count": 0,
                 "tool_choice": "none",
-                "sampling": {**H05.SAMPLING, "seed": H05.SEEDS[0]},
+                "sampling": _sampling_telemetry(H05.SEEDS[0]),
             },
         }
         done = {
