@@ -1,0 +1,75 @@
+{
+  "artifact_type": "ninfer_h05_public_engineering_fixture",
+  "schema_version": 1,
+  "classification": "NON-QUALIFYING",
+  "source_manifest": "examples/cli/manifest.json",
+  "source_manifest_sha256": "d2fc41e838b89669db2df97542f114157409da13454184308d0e3d1fe92f7b68",
+  "cases": [
+    {
+      "case_id": "async_gpu_job_runner",
+      "source_case": "scenario_code_python",
+      "source_messages": "examples/cli/messages/scenario_code_python.json",
+      "source_messages_sha256": "467a6df1e5a5b7ccccf4bfadf7c2b7761f803e7a61d478440ab31bd41229fab5",
+      "thinking": false,
+      "max_completion_tokens": 4096,
+      "tool_choice": "none",
+      "tools": [],
+      "parallel_tool_calls": false,
+      "quality_terms": [
+        "pyproject.toml",
+        "asyncio",
+        "JSONL",
+        "pytest"
+      ],
+      "expected_tool_call": null
+    },
+    {
+      "case_id": "cuda_toolchain_lookup",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are helping inspect this public software project. Do not guess environment facts. Call the available function exactly once with key cuda_toolkit, and return only that function call."
+        },
+        {
+          "role": "user",
+          "content": "Look up the CUDA Toolkit version used by this project's supported development setup. Make the lookup call now."
+        }
+      ],
+      "thinking": false,
+      "max_completion_tokens": 96,
+      "tool_choice": "auto",
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup_public_environment_fact",
+            "description": "Look up one fact in the fixed public engineering benchmark fixture.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "enum": [
+                    "cuda_toolkit"
+                  ]
+                }
+              },
+              "required": [
+                "key"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "parallel_tool_calls": true,
+      "quality_terms": [],
+      "expected_tool_call": {
+        "name": "lookup_public_environment_fact",
+        "arguments": {
+          "key": "cuda_toolkit"
+        }
+      }
+    }
+  ]
+}

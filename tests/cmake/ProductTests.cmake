@@ -33,6 +33,10 @@ add_test(NAME ninfer_decode_research_analysis_test
           ${CMAKE_CURRENT_LIST_DIR}/../test_decode_research_analysis.py
           ${PROJECT_SOURCE_DIR}/tools/analyze_decode_research.py)
 
+add_test(NAME ninfer_h05_width_aba_test
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/../test_h05_width_aba.py)
+
 ninfer_add_test(ninfer_openai_schema_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_openai_schema.cpp"
   LIBRARIES ninfer_serve)

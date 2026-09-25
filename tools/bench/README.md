@@ -4,6 +4,93 @@ Maintainer orchestration for the public `ninfer_bench` throughput tool, serving 
 runners, and the external Serve TTFT client. Correctness is owned by the affected suites under
 [`tests/`](../../tests/README.md).
 
+## E0002-H05 public width probe
+
+[`h05_width_aba.py`](h05_width_aba.py) runs one isolated, **NON-QUALIFYING** positive-temperature
+K7-A → K3 → K7-B Serve experiment. It uses only the checked-in async Python engineering prompt
+from `examples/cli/` and the public tool-call case in
+[`fixtures/h05_public_engineering.json`](fixtures/h05_public_engineering.json). Each case uses three
+fixed request seeds. Code and tool requests alternate in a fixed order, and the same order and
+request-body SHA-256 values repeat in all three arms. The report stores hashes, token lengths,
+finish reasons, tool-call counts/names, timings, and GPU state; it never stores request messages,
+generated text, or tool arguments.
+
+The checked sampler is temperature `0.6`, top-p `0.95`, top-k `20`, min-p `0`, presence penalty
+`1.0`, and frequency penalty `0`. Each request explicitly sets all six values and its seed. The
+client sends no stop strings. Thinking is explicitly disabled. The code case retains its public
+4,096-token output budget; the fixed tool-call case has a 96-token budget. An output-limit finish,
+missing public quality markers, or an incorrect/missing structured tool call invalidates the run.
+The tool is described to the model but never executed.
+
+Every arm starts a fresh Serve process with the same exact `.ninfer` path and SHA-256, request
+corpus, cache, graph, and runtime settings. It uses MTP with the optimized proposal head, K8V4 KV,
+188,416 context and KV capacity, prefill chunks of 1,024, concurrency one, CUDA Graph enabled,
+prefix reuse disabled, and one unmeasured eight-token warmup. Only draft width changes. Request
+logs must confirm each actual sampler, seed, width, root-only prefix path, artifact, and GPU; GPU
+UUID, binary SHA-256, CMake cache SHA-256, and source revision are held fixed across arms.
+
+`ninfer-serve` currently exposes request-level `request_done` aggregates but not the CLI's
+`--decode-research-jsonl` option. The runner's default `--decode-events auto` checks Serve help;
+when the server supports that flag, it captures and validates the content-free H03 stream and
+reports actual draft extent and extent-conditioned accepted/committed survival. Otherwise it marks
+the report `request_aggregate_fallback`: request logs still support coarse committed yield and
+round-cost triage, while exact per-position survival is unavailable. H03-captured results remain
+exploratory because observer overhead has not been qualified for this Serve route.
+
+Analysis uses completion tokens after the first prefill token for committed decode rates, divided
+by request decode seconds. Tokens per round and milliseconds per round are ratio-of-sums. It also
+reports draft acceptance and the raw accepted-position counts from request aggregates. Before any
+axis decision, all requests must succeed with matching configuration and prompt lengths, the
+three arm output-token totals must be within 15% of K3, and no paired request may differ by more
+than 35% in output length. The 35% output-length guard applies to K7 versus K3 and to the K7-A/K7-B
+repeat. The paired geometric-mean K7-B/K7-A decode-rate and round-time drift must each stay within
+5%, with no individual pair exceeding 20% drift on either metric. After-request GPU temperature may
+move at most 8°C, and graphics clock at most 5%; every measured request needs a complete
+post-request temperature/clock sample. Missing thermal samples, configuration drift, failed
+requests, a failed tool/quality check, output-length drift, or a K7 control outside these limits
+makes the result inconclusive.
+
+With every gate passing, the next axis is `acceptance-axis` only if geometric-mean K7 committed
+tokens per round and decode tok/s each exceed K3 by at least 5%. It is `latency-axis` only if K7
+round time is at least 5% higher, K7 committed tokens per round improve by less than 5%, and K7
+decode tok/s improves by no more than 5%. Every other result is inconclusive. These criteria
+select only a follow-up research axis; they do not qualify a production width or performance claim.
+
+### FNN runbook
+
+Run only after the isolated H03 CUDA integration and its focused tests pass. Use the exact checkout
+and build directory recorded by the completed H03/FNN report; the path below is the current LW10
+isolated root, not the protected production checkout. Do not select a checkout, build, binary, or
+artifact by glob or modification time.
+
+```bash
+H03_ROOT=/home/aramirezfamily/.local/share/ninfer-e0002-lw10-d3ccf352d55b-clean
+BUILD_DIR="$H03_ROOT/build"
+SERVE_BIN="$BUILD_DIR/apps/ninfer-serve"
+ARTIFACT=/home/aramirezfamily/josh/cinference-4090/models/qwen3_8_27b.ablit-wxp.ninfer
+ARTIFACT_SHA256=b7c6693244cf7ab08554fff41c4f3c67695b6ec388c99eed6f12e0e71046fda8
+FNN_H05_ROOT=/home/aramirezfamily/.local/share/ninfer/e0002-lw11-h05-r1
+
+install -d -m 700 "$FNN_H05_ROOT"
+cmake --build "$BUILD_DIR" -j --target ninfer-serve
+ctest --test-dir "$BUILD_DIR" --output-on-failure -R '^ninfer_h05_width_aba_test$'
+python3.11 tools/bench/h05_width_aba.py run \
+  --serve "$SERVE_BIN" \
+  --artifact "$ARTIFACT" \
+  --artifact-sha256 "$ARTIFACT_SHA256" \
+  --cmake-cache "$BUILD_DIR/CMakeCache.txt" \
+  --output "$FNN_H05_ROOT/raw" \
+  --port 18082 \
+  --decode-events auto
+```
+
+The artifact path and hash above are the exact values recorded by the FNN preflight; the runner
+rechecks the file before and between arms. Confirm the completed H03 report's checkout/build path
+before using the two `H03_ROOT`/`BUILD_DIR` assignments. The runner creates the new `raw` directory
+with owner-only permissions and fails if it already contains files. It writes one body-free
+`run.json`, per-arm Serve request logs, private stderr logs, request summaries, and `analysis.json`.
+It stops after that single ABA run. No production service is readied, restarted, or modified.
+
 ## External Serve TTFT
 
 [`ttft/README.md`](ttft/README.md) defines the black-box latency benchmark. The measurement runner
