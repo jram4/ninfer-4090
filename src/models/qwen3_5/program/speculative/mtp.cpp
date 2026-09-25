@@ -158,16 +158,22 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
         {
             nvtx::ScopedRange draft_range(nvtx::Name::DecodeMtpDraft, nvtx::Category::Mtp,
                                           static_cast<std::uint64_t>(k) * batch_size);
-            ops::mtp_prepare_next_round(verify_ids, anchors, accepted, frontiers, budgets,
-                                        licensed_counts, rope_deltas, alignment_ids, next_extents,
-                                        ar_positions, ar_rope_positions, ar_valid_columns,
-                                        static_cast<std::int32_t>(state.text_cache.max_context()),
-                                        state.execution.device.stream);
-            card.mtp_forward_decode_batch(alignment_ids, target_hidden, target_positions,
-                                          target_rope, licensed_counts, mtp_rows, envelopes.batch,
-                                          alignment_hidden);
-            ops::speculative_select_accepted_hidden(alignment_hidden, accepted, ar_hidden,
-                                                    state.execution.device.stream);
+            {
+                nvtx::ScopedRange alignment_range(
+                    nvtx::Name::DecodeMtpAlignment, nvtx::Category::Mtp,
+                    static_cast<std::uint64_t>(k) * batch_size);
+                ops::mtp_prepare_next_round(verify_ids, anchors, accepted, frontiers, budgets,
+                                            licensed_counts, rope_deltas, alignment_ids,
+                                            next_extents, ar_positions, ar_rope_positions,
+                                            ar_valid_columns,
+                                            static_cast<std::int32_t>(state.text_cache.max_context()),
+                                            state.execution.device.stream);
+                card.mtp_forward_decode_batch(alignment_ids, target_hidden, target_positions,
+                                              target_rope, licensed_counts, mtp_rows,
+                                              envelopes.batch, alignment_hidden);
+                ops::speculative_select_accepted_hidden(alignment_hidden, accepted, ar_hidden,
+                                                        state.execution.device.stream);
+            }
 
             Tensor proposal_logits = frame.proposal_logits.slice(1, 0, batch_size);
             Tensor draft0          = next_drafts.slice(1, 0, 1).view({batch_size});

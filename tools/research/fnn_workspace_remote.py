@@ -517,7 +517,9 @@ def record_build(request: dict[str, Any]) -> None:
         "CMAKE_CXX_COMPILER",
         "CMAKE_CUDA_ARCHITECTURES",
         "CMAKE_CUDA_COMPILER",
+        "CMAKE_COMMAND",
         "CMAKE_GENERATOR",
+        "CMAKE_MAKE_PROGRAM",
         "NINFER_BUILD_APPS",
         "NINFER_BUILD_BENCHMARKS",
     }
@@ -529,6 +531,30 @@ def record_build(request: dict[str, Any]) -> None:
         name = key.split(":", 1)[0]
         if name in config_keys:
             config[name] = value
+
+    toolchain_executables: dict[str, dict[str, Any]] = {}
+    for name in (
+        "CMAKE_COMMAND",
+        "CMAKE_MAKE_PROGRAM",
+        "CMAKE_CXX_COMPILER",
+        "CMAKE_CUDA_COMPILER",
+    ):
+        executable = config.get(name)
+        if not executable or not os.path.isabs(executable):
+            continue
+        resolved = os.path.realpath(executable)
+        try:
+            info = os.stat(resolved)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        toolchain_executables[name] = {
+            "path": executable,
+            "resolved_path": resolved,
+            "sha256": sha256_file(resolved),
+            "size_bytes": info.st_size,
+        }
 
     manifest = Path(paths["results"]) / "provenance.json"
     manifest_stat = os.lstat(manifest)
@@ -554,6 +580,7 @@ def record_build(request: dict[str, Any]) -> None:
         "cmake_cache": cache_path,
         "cmake_cache_sha256": sha256_file(cache_path),
         "configuration": config,
+        "toolchain_executables": toolchain_executables,
         "recorded_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     manifest.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")

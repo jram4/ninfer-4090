@@ -606,6 +606,8 @@ void TextContext::proposal_sample_mtp(
     require_tensor_shape(proposal_tokens, DType::I32, {batch}, "MTP sampled proposal tokens");
     auto proposal_scope = work_.scope();
     const int token_domain = dimension(parameters_.model.resources().public_token_count);
+    nvtx::ScopedRange proposal_range(nvtx::Name::MtpProposal, nvtx::Category::Mtp,
+                                     static_cast<std::uint64_t>(batch));
     if (proposal_head_ != nullptr) {
         Tensor proposal_logits = work_.alloc(DType::BF16, {proposal_head_n_, batch});
         project(hidden, *proposal_head_, proposal_logits, work_, ctx_.stream);
@@ -798,12 +800,16 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
         }
         Tensor flat_hidden = hidden.view({dimension(config_.hidden_size), columns});
         Tensor flat_logits = logits.view({dimension(config_.vocab_size), columns});
-        ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, flat_hidden, stream);
-        project(flat_hidden, *lm_head_, flat_logits, work_, stream);
-        if (target_tokens != nullptr) {
-            Tensor flat_tokens = target_tokens->view({columns});
-            ops::argmax(flat_logits, flat_tokens,
-                        dimension(parameters_.model.resources().public_token_count), stream);
+        {
+            nvtx::ScopedRange head_range(nvtx::Name::DecodeMtpTargetHead, nvtx::Category::Mtp,
+                                         static_cast<std::uint64_t>(columns));
+            ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, flat_hidden, stream);
+            project(flat_hidden, *lm_head_, flat_logits, work_, stream);
+            if (target_tokens != nullptr) {
+                Tensor flat_tokens = target_tokens->view({columns});
+                ops::argmax(flat_logits, flat_tokens,
+                            dimension(parameters_.model.resources().public_token_count), stream);
+            }
         }
     }
     work_.reset();
