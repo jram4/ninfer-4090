@@ -563,7 +563,8 @@ struct SparseAcceptSuite {
         return failures;
     }
 
-    int sparse_greedy_direct_case(int pattern = 0, bool general = false) {
+    int sparse_greedy_direct_case(int pattern = 0, bool general = false,
+                                  bool invalidate_target_tokens = false) {
         std::vector<std::int32_t> targets(kSparseColumns * kSparseBatch),
             drafts(kSparseDrafts * kSparseBatch);
         std::vector<std::uint16_t> logits(static_cast<std::size_t>(kSparsePhysicalRows) *
@@ -589,7 +590,8 @@ struct SparseAcceptSuite {
             lengths[row]     = 4096 + row * 13;
             for (int col = 0; col < kSparseColumns; ++col) {
                 const int target                             = 100000 + row * 128 + col;
-                targets[row * kSparseColumns + col]          = target;
+                targets[row * kSparseColumns + col] =
+                    invalidate_target_tokens ? -777 : target;
                 logits[sparse_logit_index(row, col, target)] = f32_to_bf16(20.0f);
                 for (int v = kSparseTokenDomain; v < kSparsePhysicalRows; ++v)
                     logits[sparse_logit_index(row, col, v)] = f32_to_bf16(100.0f);
@@ -1193,6 +1195,84 @@ int transforms_conformance() {
     return failures;
 }
 
+
+int sparse_small_width20_greedy_logits_case() {
+    constexpr int token_domain = 64;
+    constexpr int physical_rows = 64;
+    constexpr int drafts_count = 1;
+    constexpr int columns = drafts_count + 1;
+    constexpr int candidate_count = ops::kSamplingCandidateCapacity;
+    std::vector<float> logits(static_cast<std::size_t>(physical_rows) * columns, -5.0F);
+    logits[2] = 5.0F;
+    logits[physical_rows + 4] = 5.0F;
+    std::vector<int> target_tokens(columns, -777);
+    std::vector<int> drafts{1};
+    std::vector<int> candidates(candidate_count);
+    for (int candidate = 0; candidate < candidate_count; ++candidate)
+        candidates[static_cast<std::size_t>(candidate)] = (1 + candidate) % token_domain;
+    std::vector<float> q(candidate_count, 0.0F);
+    q[0] = 1.0F;
+    std::vector<int> extents{1}, initial_lengths{10}, initial_anchors{0};
+    std::vector<ops::SamplingConfig> configs(1);
+    configs[0].temperature = 0.0F;
+    DeviceBuffer d_target_tokens = to_device(target_tokens);
+    DeviceBuffer d_logits = to_device_bf16(logits);
+    DeviceBuffer d_drafts = to_device(drafts);
+    DeviceBuffer d_candidates = to_device(candidates);
+    DeviceBuffer d_q = to_device(q);
+    DeviceBuffer d_extents = to_device(extents);
+    DeviceBuffer d_configs = to_device(configs);
+    GuardedDeviceBuffer d_lengths(sizeof(int)), d_anchors(sizeof(int));
+    GuardedDeviceBuffer d_licensed(columns * sizeof(int));
+    GuardedDeviceBuffer d_licensed_counts(sizeof(int)), d_accepted(sizeof(int));
+    initialize(d_lengths, initial_lengths);
+    initialize(d_anchors, initial_anchors);
+    d_licensed.fill(0xcd);
+    d_licensed_counts.fill(0xef);
+    d_accepted.fill(0xab);
+    Tensor target_tensor(d_target_tokens.p, DType::I32, {columns, 1});
+    Tensor logits_tensor(d_logits.p, DType::BF16, {physical_rows, columns, 1});
+    Tensor drafts_tensor(d_drafts.p, DType::I32, {drafts_count, 1});
+    Tensor candidates_tensor(d_candidates.p, DType::I32, {candidate_count, drafts_count, 1});
+    Tensor q_tensor(d_q.p, DType::FP32, {candidate_count, drafts_count, 1});
+    Tensor extents_tensor(d_extents.p, DType::I32, {1});
+    Tensor lengths_tensor(d_lengths.data(), DType::I32, {1});
+    Tensor anchors_tensor(d_anchors.data(), DType::I32, {1});
+    Tensor licensed_tensor(d_licensed.data(), DType::I32, {columns, 1});
+    Tensor licensed_counts_tensor(d_licensed_counts.data(), DType::I32, {1});
+    Tensor accepted_tensor(d_accepted.data(), DType::I32, {1});
+    const std::size_t workspace_bytes =
+        ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
+            token_domain, {false}, drafts_count, drafts_count, 1, 1);
+    GuardedDeviceBuffer scratch(std::max<std::size_t>(workspace_bytes, 1));
+    WorkspaceArena workspace(DeviceSpan{scratch.data(), scratch.bytes()});
+    ops::speculative_accept_sparse_drafts(
+        target_tensor, logits_tensor, drafts_tensor, candidates_tensor, q_tensor,
+        extents_tensor, lengths_tensor, anchors_tensor, licensed_tensor,
+        licensed_counts_tensor, accepted_tensor, token_domain,
+        static_cast<const ops::SamplingConfig*>(d_configs.p), {false}, workspace, nullptr);
+    cuda_synchronize();
+
+    int failures = verify_exact("small sparse greedy correction token",
+                                read<int>(d_licensed, columns), std::vector<int>{2, 0});
+    failures += verify_exact("small sparse greedy accepted count",
+                             read<int>(d_accepted, 1), std::vector<int>{0});
+    failures += verify_exact("small sparse greedy licensed count",
+                             read<int>(d_licensed_counts, 1), std::vector<int>{1});
+    failures += verify_exact("small sparse greedy provisional length",
+                             read<int>(d_lengths, 1), std::vector<int>{11});
+    failures += verify_exact("small sparse greedy anchor",
+                             read<int>(d_anchors, 1), std::vector<int>{2});
+    failures += verify_exact("small sparse target tokens unused",
+                             from_device<int>(d_target_tokens.p, target_tokens.size()), target_tokens);
+    failures += d_lengths.verify_guards("small sparse greedy lengths");
+    failures += d_anchors.verify_guards("small sparse greedy anchors");
+    failures += d_licensed.verify_guards("small sparse greedy licensed tokens");
+    failures += d_licensed_counts.verify_guards("small sparse greedy counts");
+    failures += d_accepted.verify_guards("small sparse greedy accepted");
+    return failures;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1260,6 +1340,9 @@ int main(int argc, char** argv) {
             ++failures;
         } catch (const std::invalid_argument&) {}
     }
+    failures += SparseAcceptSuite(1, 1).sparse_greedy_direct_case(0, true, true);
+    failures += sparse_small_width20_greedy_logits_case();
+
     for (int k : {1, 7, 15}) {
         SparseAcceptSuite suite(k, 8);
         failures += suite.sparse_general_mixed_case();

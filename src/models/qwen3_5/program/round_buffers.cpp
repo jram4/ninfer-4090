@@ -264,6 +264,14 @@ MtpDecodeState::MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& l
         ingress_tensor(offsetof(MtpDecodeIngress, target_valid_columns), DType::I32, {batch});
     current_drafts =
         ingress_tensor(offsetof(MtpDecodeIngress, current_drafts), DType::I32, {drafts, batch});
+    candidate_ids = Tensor(static_cast<unsigned char*>(ingress.data) +
+                               offsetof(MtpDecodeIngress, current_candidate_ids),
+                           DType::I32, {static_cast<std::int32_t>(kMtpProposalCandidates), drafts,
+                                        batch});
+    proposal_q = Tensor(static_cast<unsigned char*>(ingress.data) +
+                            offsetof(MtpDecodeIngress, current_proposal_q),
+                        DType::FP32, {static_cast<std::int32_t>(kMtpProposalCandidates), drafts,
+                                      batch});
     target_rope_positions = ingress_tensor(offsetof(MtpDecodeIngress, target_rope_positions),
                                            DType::I32, {width, batch});
     text_kv_table_rows =
@@ -286,6 +294,14 @@ MtpDecodeState::MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& l
         egress_tensor(offsetof(MtpDecodeEgress, accepted_drafts), DType::I32, {batch});
     next_drafts =
         egress_tensor(offsetof(MtpDecodeEgress, next_drafts), DType::I32, {batch, drafts});
+    next_candidate_ids = Tensor(static_cast<unsigned char*>(egress.data) +
+                                    offsetof(MtpDecodeEgress, next_candidate_ids),
+                                DType::I32,
+                                {static_cast<std::int32_t>(kMtpProposalCandidates), drafts, batch});
+    next_proposal_q = Tensor(static_cast<unsigned char*>(egress.data) +
+                                 offsetof(MtpDecodeEgress, next_proposal_q),
+                             DType::FP32,
+                             {static_cast<std::int32_t>(kMtpProposalCandidates), drafts, batch});
     next_extents     = egress_tensor(offsetof(MtpDecodeEgress, next_extents), DType::I32, {batch});
     verify_ids       = layout.verify_ids.bind(backing);
     target_positions = layout.target_positions.bind(backing);
