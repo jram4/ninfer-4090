@@ -401,26 +401,14 @@ def _replay_to_rows(plan: dict[str, Any], split: str, capsule_root: Path,
     return rows
 
 
-def _candidate_arm(args: argparse.Namespace, split: str, evidence_name: str) -> int:
-    """Replay a plan with the candidate's own server and reduce the pair.
-
-    The candidate starts its own Serve from the binary the build stage
-    produced, replays the plan's capsules against it, and reduces the result
-    against the stored baseline rows for the same plan.
-    """
-    plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
-    report = stage_support._binding()
-    binary = Path(os.environ.get("NINFER_CANDIDATE_BINARY_PATH") or args.binary)
-    # The artifact and template come from the trusted policy contract, which
-    # the evaluator passes to the stage as environment variables.
-    model = Path(os.environ.get("NINFER_MODEL_ARTIFACT") or args.model)
-    template = Path(os.environ.get("NINFER_CHAT_TEMPLATE") or args.template)
-    rows_path = Path(args.rows)
+def _replay_with_server(plan: dict[str, Any], split: str, binary: Path, model: Path,
+                        template: Path, capsule_root: Path, rows_path: Path,
+                        port: int) -> list[dict[str, Any]]:
+    """Start one server, replay a split against it, and merge its telemetry."""
     log_path = rows_path.with_suffix(".serve.jsonl")
-    port = int(os.environ.get("NINFER_REPLAY_PORT", "18099"))
     process = _start_serve(binary, model, template, log_path, port)
     try:
-        rows = _replay_to_rows(plan, split, Path(args.capsule_root),
+        rows = _replay_to_rows(plan, split, capsule_root,
                                f"http://127.0.0.1:{port}", rows_path)
     finally:
         process.terminate()
@@ -431,7 +419,39 @@ def _candidate_arm(args: argparse.Namespace, split: str, evidence_name: str) -> 
     _merge_serve_telemetry(rows, log_path)
     rows_path.write_text(
         "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8")
-    return _compare(plan, split, Path(args.baseline_rows), rows_path, report, evidence_name,
+    return rows
+
+
+def _candidate_arm(args: argparse.Namespace, split: str, evidence_name: str) -> int:
+    """Measure both arms in one stage and reduce the pair.
+
+    The baseline arm is the qualified release named by the trusted contract and
+    the candidate arm is the binary the build stage produced. Both replay the
+    same plan, in the same window, on the same GPU, so the only difference
+    between the arms is the server that answered.
+    """
+    plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+    report = stage_support._binding()
+    candidate_binary = Path(os.environ.get("NINFER_CANDIDATE_BINARY_PATH") or args.binary)
+    baseline_binary = Path(args.baseline_binary)
+    expected_baseline = os.environ.get("NINFER_BASELINE_BINARY_SHA256")
+    if expected_baseline and _sha256_file(baseline_binary) != expected_baseline:
+        raise ProjectStageError("the baseline release binary does not match the trusted contract")
+    # The artifact and template come from the trusted policy contract, which
+    # the evaluator passes to the stage as environment variables.
+    model = Path(os.environ.get("NINFER_MODEL_ARTIFACT") or args.model)
+    template = Path(os.environ.get("NINFER_CHAT_TEMPLATE") or args.template)
+    capsule_root = Path(args.capsule_root)
+    rows_path = Path(args.rows)
+    baseline_rows = rows_path.with_name(rows_path.stem + "-baseline.jsonl")
+    baseline_port = int(os.environ.get("NINFER_BASELINE_PORT", "18098"))
+    candidate_port = int(os.environ.get("NINFER_REPLAY_PORT", "18099"))
+
+    _replay_with_server(plan, split, baseline_binary, model, template, capsule_root,
+                         baseline_rows, baseline_port)
+    _replay_with_server(plan, split, candidate_binary, model, template, capsule_root,
+                         rows_path, candidate_port)
+    return _compare(plan, split, baseline_rows, rows_path, report, evidence_name,
                     {"holdout_result": "pass"} if split == "holdout" else None)
 
 
@@ -642,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--binary", required=True)
         command.add_argument("--model", default="")
         command.add_argument("--template", default="")
-        command.add_argument("--baseline-rows", required=True)
+        command.add_argument("--baseline-binary", required=True)
         command.add_argument("--rows", required=True)
     args = parser.parse_args(argv)
     handlers = {

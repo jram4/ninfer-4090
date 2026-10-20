@@ -3,7 +3,14 @@
     "path": "/home/aramirezfamily/josh/cinference-4090/models/qwen3_8_27b.ablit-wxp.ninfer",
     "sha256": "b7c6693244cf7ab08554fff41c4f3c67695b6ec388c99eed6f12e0e71046fda8",
     "size_bytes": 18210704128,
-    "formats": ["bf16", "fp32", "int32", "q4_g64_fp16", "q5_g64_fp16", "q8_g32_fp16"]
+    "formats": [
+      "bf16",
+      "fp32",
+      "int32",
+      "q4_g64_fp16",
+      "q5_g64_fp16",
+      "q8_g32_fp16"
+    ]
   },
   "runtime": {
     "max_context": 188416,
@@ -56,6 +63,11 @@
         "top_k": null,
         "top_p": null
       }
+    },
+    "binary": {
+      "path": "/home/aramirezfamily/josh/cinference-4090/releases/sampled-mtp-20260924-70ebb12/ninfer-serve",
+      "sha256": "f9e27c1c162f8767e055c71a9b38c03217bcbcb77437ce20c749454fe99b365a",
+      "size_bytes": 320457072
     }
   },
   "template": {

@@ -83,7 +83,7 @@ def build_specification(args: argparse.Namespace) -> dict:
                 "--plan", str(plan),
                 "--capsule-root", "/",
                 "--binary", "{build_dir}/apps/ninfer-serve",
-                "--baseline-rows", str(baseline),
+                "--baseline-binary", args.baseline_binary,
                 "--rows", "{run_dir}/rows.jsonl",
             ],
             "timeout_seconds": 14400,
@@ -110,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--contract", required=True, type=Path)
     parser.add_argument("--plan", required=True, type=Path)
-    parser.add_argument("--baseline-rows", required=True, type=Path)
+    parser.add_argument("--baseline-binary", required=True)
     parser.add_argument("--harness", required=True)
     parser.add_argument("--baseline-id", default="baseline-sampled-k7-70ebb12")
     parser.add_argument("--corpus-id", default="")
