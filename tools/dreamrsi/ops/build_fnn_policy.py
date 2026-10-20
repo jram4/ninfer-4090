@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Build the trusted FNN evaluation policy for a corpus plan.
+
+The policy is what a candidate must pass. It is generated here so the operator
+never hand-writes a policy, and so the stage commands, the corpus plan, and the
+baseline rows always refer to the same plan identity.
+
+The baseline rows are produced by replaying the same plan against the running
+qualified release, so the two arms differ only in the server that answered.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
+
+from tools.dreamrsi import contracts, policy as policy_builder  # noqa: E402
+
+
+DEFAULT_REMOTE_ROOT = "/home/aramirezfamily/.local/share/ninfer-bench"
+REMOTE_PYTHON = ("/home/aramirezfamily/.local/share/uv/python/"
+                 "cpython-3.11-linux-x86_64-gnu/bin/python3.11")
+
+
+def build_specification(args: argparse.Namespace) -> dict:
+    harness = args.harness
+    plan = args.plan
+    baseline = args.baseline_rows
+    contract = json.loads(args.contract.read_text(encoding="utf-8"))
+    stages = [
+        {
+            "name": "admission",
+            "argv": [REMOTE_PYTHON, f"{harness}/stage.py", "toolchain"],
+            "timeout_seconds": 300,
+            "required_evidence": ["toolchain_evidence"],
+            "criteria": {"equals": {"status": "pass"},
+                         "toolchain": {"cmake": "4.4", "cuda": "13"}},
+        },
+        {
+            "name": "build",
+            "argv": [REMOTE_PYTHON, f"{harness}/project_stages.py", "build"],
+            "timeout_seconds": 10800,
+            "required_evidence": ["build_evidence", "candidate_binary"],
+            "criteria": {
+                "equals": {"status": "pass"},
+                "build_identity": {
+                    "flags": {"build_type": "Release", "cuda_architectures": "89",
+                              "apps": "ON", "benchmarks": "ON", "testing": "ON"},
+                    "dependencies": [],
+                },
+            },
+        },
+        {
+            "name": "correctness",
+            "argv": [REMOTE_PYTHON, f"{harness}/project_stages.py", "correctness"],
+            "timeout_seconds": 7200,
+            "required_evidence": ["correctness_evidence"],
+            "gates": ["semantic"],
+            "criteria": {"equals": {"status": "pass", "semantic_result": "pass"}},
+        },
+        {
+            "name": "smoke",
+            "argv": [REMOTE_PYTHON, f"{harness}/project_stages.py", "smoke"],
+            "timeout_seconds": 1800,
+            "required_evidence": ["smoke_evidence", "contract_observation"],
+            "gates": ["task"],
+            "criteria": {"equals": {"status": "pass", "task_result": "pass"}},
+        },
+    ]
+    for name, split, evidence, gate, extra in (
+        ("screen", "screen", "screen_evidence", None, {}),
+        ("full", "holdout", "full_evidence", "holdout", {"minimum": {"holdout_groups": 2}}),
+    ):
+        stage = {
+            "name": name,
+            "argv": [
+                REMOTE_PYTHON, f"{harness}/project_stages.py", name,
+                "--plan", str(plan),
+                "--capsule-root", "/",
+                "--binary", "{build_dir}/apps/ninfer-serve",
+                "--baseline-rows", str(baseline),
+                "--rows", "{run_dir}/rows.jsonl",
+            ],
+            "timeout_seconds": 14400,
+            "required_evidence": [evidence],
+            "criteria": {"equals": {"status": "pass"}, **extra},
+        }
+        if gate:
+            stage["gates"] = [gate]
+            stage["criteria"]["equals"]["holdout_result"] = "pass"
+        if name == "screen":
+            stage["criteria"]["minimum"] = {"independent_sessions": 8}
+        stages.append(stage)
+    return {
+        "contract": contract,
+        "baseline_id": args.baseline_id,
+        "corpus_id": args.corpus_id,
+        "toolchain_id": "fnn-cuda13-cmake44",
+        "qualification_enabled": args.qualification_enabled,
+        "stages": stages,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--contract", required=True, type=Path)
+    parser.add_argument("--plan", required=True, type=Path)
+    parser.add_argument("--baseline-rows", required=True, type=Path)
+    parser.add_argument("--harness", required=True)
+    parser.add_argument("--baseline-id", default="baseline-sampled-k7-70ebb12")
+    parser.add_argument("--corpus-id", default="")
+    parser.add_argument("--qualification-enabled", action="store_true")
+    parser.add_argument("--output", required=True, type=Path)
+    args = parser.parse_args(argv)
+    try:
+        plan = json.loads(args.plan.read_text(encoding="utf-8"))
+        args.corpus_id = args.corpus_id or plan["corpus_id"]
+        specification = build_specification(args)
+        built = policy_builder.build_policy(specification)
+        contracts.write_json(args.output, built)
+        print(json.dumps({
+            "policy_id": built["policy_id"],
+            "contract_id": built["contract_id"],
+            "corpus_id": built["corpus_id"],
+            "qualification_enabled": built["qualification_enabled"],
+            "stages": [stage["name"] for stage in built["stages"]],
+            "output": str(args.output),
+        }, sort_keys=True))
+        return 0
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        print(f"build_fnn_policy.py: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

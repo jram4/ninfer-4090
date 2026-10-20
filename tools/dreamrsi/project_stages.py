@@ -411,8 +411,10 @@ def _candidate_arm(args: argparse.Namespace, split: str, evidence_name: str) -> 
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
     report = stage_support._binding()
     binary = Path(os.environ.get("NINFER_CANDIDATE_BINARY_PATH") or args.binary)
-    model = Path(args.model)
-    template = Path(args.template)
+    # The artifact and template come from the trusted policy contract, which
+    # the evaluator passes to the stage as environment variables.
+    model = Path(os.environ.get("NINFER_MODEL_ARTIFACT") or args.model)
+    template = Path(os.environ.get("NINFER_CHAT_TEMPLATE") or args.template)
     rows_path = Path(args.rows)
     log_path = rows_path.with_suffix(".serve.jsonl")
     port = int(os.environ.get("NINFER_REPLAY_PORT", "18099"))
@@ -453,8 +455,10 @@ def stage_smoke(_: argparse.Namespace) -> int:
     binary = Path(os.environ.get("NINFER_CANDIDATE_BINARY_PATH") or (build / "apps" / "ninfer-serve"))
     if not binary.is_file():
         raise ProjectStageError("the candidate binary is missing")
-    model = Path(os.environ["NINFER_MODEL_ARTIFACT"])
-    template = Path(os.environ["NINFER_CHAT_TEMPLATE"])
+    model = Path(os.environ.get("NINFER_MODEL_ARTIFACT") or "")
+    template = Path(os.environ.get("NINFER_CHAT_TEMPLATE") or "")
+    if not str(model) or not str(template):
+        raise ProjectStageError("the trusted policy did not provide the model artifact and template")
     log_path = _raw_path("smoke-serve.jsonl")
     port = int(os.environ.get("NINFER_SMOKE_PORT", "18099"))
     process = _start_serve(binary, model, template, log_path, port)
@@ -636,8 +640,8 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--plan", required=True)
         command.add_argument("--capsule-root", required=True)
         command.add_argument("--binary", required=True)
-        command.add_argument("--model", required=True)
-        command.add_argument("--template", required=True)
+        command.add_argument("--model", default="")
+        command.add_argument("--template", default="")
         command.add_argument("--baseline-rows", required=True)
         command.add_argument("--rows", required=True)
     args = parser.parse_args(argv)
