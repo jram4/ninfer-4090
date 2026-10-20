@@ -4,6 +4,69 @@ Maintainer orchestration for the public `ninfer_bench` throughput tool, serving 
 runners, and the external Serve TTFT client. Correctness is owned by the affected suites under
 [`tests/`](../../tests/README.md).
 
+## Captured HTTP replay
+
+replay_capture.py replays captured Anthropic/OpenAI JSON requests serially
+against an already-running NInfer Serve process. It reads a JSONL manifest whose records contain
+seq, timestamp, method, path, allowlisted headers, body_file, body_sha256,
+request_bytes, and the original response_status. Raw body paths are relative to the manifest;
+the runner verifies their size and SHA-256 before sending. Manifest records are sorted by seq,
+then any excluded sequence numbers are removed.
+
+~~~bash
+export NINFER_API_KEY='local-test-key'
+python3 tools/bench/replay_capture.py \
+  --manifest /path/to/capture/manifest.jsonl \
+  --base-url http://127.0.0.1:8081 \
+  --output profiles/bench/qwen-k7/replay.jsonl \
+  --exclude-seq 1,5,6 \
+  --server-default-seed 42
+~~~
+
+Set the test server's NInfer --seed 42 to apply the fixed seed only when a replayed request body
+does not already contain seed. The runner sends captured bodies byte-for-byte and records
+seed_mode (request, server_default, unspecified, or unknown), seed_value, and
+request_modified on every result. It does not add or replace a request seed. Authentication is
+read from NINFER_API_KEY by default; use --api-key-env ANTHROPIC_API_KEY for another environment
+variable. --auth-mode auto sends x-api-key for /v1/messages and a bearer token on other routes;
+bearer and x-api-key select either scheme explicitly. The token is never written to output.
+
+The output JSONL contains one metrics-only record per replayed request. It records HTTP status,
+client time to first response body byte, observed time to first generated SSE delta, output tokens
+when available, and decode tok/s when response metrics or streamed usage support it. Non-streaming
+HTTP responses do not expose a client-observed time to first token; the server request log can
+supply NInfer's exact TTFT. Response bodies, generated text, request bodies, body hashes, and auth
+values are never copied into results. Output files are created with mode 0600.
+
+For exact per-request NInfer metrics, start each test server configuration with a fresh
+--request-log-jsonl FILE, then merge its request log after replay. A copied log can be merged
+without issuing the prompts again:
+
+~~~bash
+python3 tools/bench/replay_capture.py \
+  --merge-server-log profiles/bench/qwen-k7/requests.jsonl \
+  --results profiles/bench/qwen-k7/replay.jsonl
+~~~
+
+When alignment succeeds, server_metrics.completion_tokens is the server's completion count;
+server_metrics.timings_seconds.decode and .ttft are the server decode/TTFT timings; and
+server_metrics.speculative.accepted_per_position, .accepted_tokens, .drafted_tokens, and
+.rounds carry speculative decoding details. Top-level output_tokens, decode_tok_per_s, and
+time_to_first_token_seconds use those server values when the server log supplies them. The runner
+joins by replay sequence to ordered request_start/request_rejected events and internal request IDs.
+It requires the fresh log's attempt count to equal the replay row count; if counts differ it
+marks all rows count_mismatch and does not guess at the association. Such a merge exits with code
+2.
+
+Replay is serial by design, preserving capture order and prefix-cache opportunities, but it does not
+recreate original client concurrency, network timing, connection pools, or client-side retries. The
+capture format retains only its allowlisted request headers; authorization is supplied separately.
+Use a dedicated test server with no unrelated generation traffic while collecting the fresh request
+log, since sequence alignment assumes the log contains only this replay's requests. --min-seq,
+--max-seq, and repeatable --exclude-seq select a subset; exclusions accept comma-separated
+sequence numbers such as --exclude-seq 1,5,6.
+
+
 ## External Serve TTFT
 
 [`ttft/README.md`](ttft/README.md) defines the black-box latency benchmark. The measurement runner
