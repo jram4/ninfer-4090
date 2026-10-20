@@ -86,9 +86,27 @@ def _raw_dir() -> Path:
     return raw
 
 
-def _command_version(argv: list[str]) -> str | None:
+def _toolchain_path() -> str:
+    """Return a PATH that resolves the verified build toolchain explicitly.
+
+    A plain non-interactive login shell sees CMake 3.22 and CUDA 11.5, both
+    below what this project requires, so the admission stage must look in the
+    known locations instead of trusting the inherited PATH.
+    """
+    parts = [
+        str(Path.home() / ".local/bin"),
+        "/usr/local/cuda-13.0/bin",
+    ]
+    inherited = os.environ.get("PATH")
+    if inherited:
+        parts.append(inherited)
+    return ":".join(parts)
+
+
+def _command_version(argv: list[str], environment: dict[str, str] | None = None) -> str | None:
     try:
-        completed = subprocess.run(argv, capture_output=True, text=True, timeout=60, check=False)
+        completed = subprocess.run(argv, capture_output=True, text=True, timeout=60, check=False,
+                                   env=environment)
     except (OSError, subprocess.SubprocessError):
         return None
     output = (completed.stdout or completed.stderr or "").strip()
@@ -98,8 +116,10 @@ def _command_version(argv: list[str]) -> str | None:
 def stage_toolchain(_: argparse.Namespace) -> int:
     """Report the actual host build toolchain for the admission stage."""
     report = _binding()
-    cmake = _command_version(["cmake", "--version"])
-    nvcc = _command_version(["nvcc", "--version"])
+    environment = dict(os.environ)
+    environment["PATH"] = _toolchain_path()
+    cmake = _command_version(["cmake", "--version"], environment)
+    nvcc = _command_version(["nvcc", "--version"], environment)
     if cmake is None or nvcc is None:
         raise StageError("cmake and nvcc must both be runnable on the evaluation host")
     report["toolchain"] = {"cmake": cmake, "cuda": nvcc}
