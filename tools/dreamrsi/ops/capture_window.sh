@@ -195,7 +195,7 @@ start() {
       --descriptor-jsonl '${remote_dir}/descriptors.jsonl' \
       --listen-host 100.119.241.20 --listen-port ${PORT} \
       --session-id '${safe}' --task-label '${safe}' --run-label 'live-capture' \
-      --traffic-class real_user --stratum '${safe}' --cache-state unknown \
+      --traffic-class real_user --stratum '${stratum}' --cache-state unknown \
       --max-requests ${max_requests} --max-seconds ${max_seconds} \
       --max-active-connections 4 --timeout 900 \
       > '${remote_dir}/capture.log' 2>&1 < /dev/null & echo \$! > '${remote_dir}/capture.pid'"
@@ -223,7 +223,7 @@ start() {
   fi
   printf 'capture window STARTED\n'
   printf '  label    : %s\n' "${safe}"
-  printf '  stratum  : %s\n' "${safe}"
+  printf '  stratum  : %s\n' "${stratum}"
   printf '  pid      : %s\n' "${pid}"
   printf '  endpoint : http://100.119.241.20:%s\n' "${PORT}"
   printf '  clients  : OpenCode and Claude Code now point at the capture port\n'
