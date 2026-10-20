@@ -327,6 +327,16 @@ class SSHExecutor:
         if local_archive.is_symlink() or not local_archive.is_file() or contracts.sha256_file(local_archive) != expected_archive_hash:
             raise TransportError("local frozen source archive is missing, linked, or changed")
 
+        # The trusted harness is resolved at run time, so a policy does not
+        # have to be rebuilt when the harness content changes.
+        remote_policy = json.loads(json.dumps(normalized_policy))
+        for stage in remote_policy.get("stages", []):
+            stage["argv"] = [
+                argument.replace("{trusted_harness}", str(self.remote_harness_root))
+                for argument in stage.get("argv", [])
+            ]
+        remote_policy = contracts.validate_policy(remote_policy)
+
         remote_submission = json.loads(json.dumps(normalized_submission))
         remote_submission["source"]["archive_path"] = remote_archive.as_posix()
         # The core submission identity explicitly excludes only this transport path.
@@ -334,7 +344,7 @@ class SSHExecutor:
         local_submission_file = staging / "submission.json"
         local_policy_file = staging / "policy.json"
         contracts.write_json(local_submission_file, remote_submission)
-        contracts.write_json(local_policy_file, normalized_policy)
+        contracts.write_json(local_policy_file, remote_policy)
 
         directory_result = self._ssh(["mkdir", "-m", "700", "-p", "--",
                                       remote_package.as_posix(), remote_policy_path.parent.as_posix(),

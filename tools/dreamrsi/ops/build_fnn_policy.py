@@ -28,13 +28,12 @@ REMOTE_PYTHON = ("/home/aramirezfamily/.local/share/uv/python/"
 
 
 def build_specification(args: argparse.Namespace) -> dict:
-    harness = args.harness
     plan = args.plan
     contract = json.loads(args.contract.read_text(encoding="utf-8"))
     stages = [
         {
             "name": "admission",
-            "argv": [REMOTE_PYTHON, f"{harness}/stage.py", "toolchain"],
+            "argv": [REMOTE_PYTHON, "{trusted_harness}/stage.py", "toolchain"],
             "timeout_seconds": 300,
             "required_evidence": ["toolchain_evidence"],
             "criteria": {"equals": {"status": "pass"},
@@ -42,7 +41,7 @@ def build_specification(args: argparse.Namespace) -> dict:
         },
         {
             "name": "build",
-            "argv": [REMOTE_PYTHON, f"{harness}/project_stages.py", "build"],
+            "argv": [REMOTE_PYTHON, "{trusted_harness}/project_stages.py", "build"],
             "timeout_seconds": 10800,
             "required_evidence": ["build_evidence", "candidate_binary"],
             "criteria": {
@@ -56,7 +55,7 @@ def build_specification(args: argparse.Namespace) -> dict:
         },
         {
             "name": "correctness",
-            "argv": [REMOTE_PYTHON, f"{harness}/project_stages.py", "correctness"],
+            "argv": [REMOTE_PYTHON, "{trusted_harness}/project_stages.py", "correctness"],
             "timeout_seconds": 7200,
             "required_evidence": ["correctness_evidence"],
             "gates": ["semantic"],
@@ -64,7 +63,7 @@ def build_specification(args: argparse.Namespace) -> dict:
         },
         {
             "name": "smoke",
-            "argv": [REMOTE_PYTHON, f"{harness}/project_stages.py", "smoke"],
+            "argv": [REMOTE_PYTHON, "{trusted_harness}/project_stages.py", "smoke"],
             "timeout_seconds": 1800,
             "required_evidence": ["smoke_evidence", "contract_observation"],
             "gates": ["task"],
@@ -78,7 +77,7 @@ def build_specification(args: argparse.Namespace) -> dict:
         stage = {
             "name": name,
             "argv": [
-                REMOTE_PYTHON, f"{harness}/project_stages.py", name,
+                REMOTE_PYTHON, "{trusted_harness}/project_stages.py", name,
                 "--plan", str(plan),
                 "--capsule-root", "/",
                 "--binary", "{build_dir}/apps/ninfer-serve",
@@ -110,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--contract", required=True, type=Path)
     parser.add_argument("--plan", required=True, type=Path)
     parser.add_argument("--baseline-binary", required=True)
-    parser.add_argument("--harness", required=True)
+    parser.add_argument("--harness", default="",
+                        help="ignored; the transport resolves the trusted harness at run time")
     parser.add_argument("--baseline-id", default="baseline-sampled-k7-70ebb12")
     parser.add_argument("--corpus-id", default="")
     parser.add_argument("--qualification-enabled", action="store_true")
