@@ -131,8 +131,6 @@ def test_qualification_policy_requires_artifact_runtime_and_sampling_locks() -> 
     policy["contract"]["model_artifact"] = {"sha256": artifact_sha, "size_bytes": 100}
     policy["contract"]["tokenizer"] = {"embedded_in_model_artifact_sha256": artifact_sha}
     policy["contract"]["runtime"] = {
-        "binary": {"sha256": "e" * 64, "size_bytes": 200},
-        "release_source_commit": "f" * 40,
         "kv_dtype": "k8v4",
         "max_context": 8192,
         "kv_capacity": 8192,

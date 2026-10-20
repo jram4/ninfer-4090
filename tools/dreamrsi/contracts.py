@@ -394,8 +394,8 @@ def _validate_qualification_contract(contract: dict[str, Any]) -> None:
     runtime = contract["runtime"]
     if not isinstance(runtime, dict):
         raise ValueError("policy.contract.runtime must carry locked runtime details")
-    _content_identity(runtime.get("binary"), "policy.contract.runtime.binary", size_required=True)
-    _commit(runtime.get("release_source_commit"), "policy.contract.runtime.release_source_commit")
+    # Source and binary identities belong to each arm's evidence, not the
+    # invariant contract: changing the implementation is the experiment.
     kv_dtype = _nonempty(runtime.get("kv_dtype"), "policy.contract.runtime.kv_dtype")
     if kv_dtype.lower() in {"unknown", "unspecified", "pending", "none"}:
         raise ValueError("qualification policy must explicitly lock runtime.kv_dtype")
