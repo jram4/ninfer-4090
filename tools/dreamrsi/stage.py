@@ -136,6 +136,8 @@ def stage_contract(_: argparse.Namespace) -> int:
     engine = start.get("engine", {})
     artifact = start.get("artifact", {})
     environment = start.get("environment", {})
+    server = start.get("server", {})
+    backend = engine.get("speculative_backend")
     observed = {
         "model_artifact": {
             "sha256": os.environ.get("NINFER_MODEL_SHA256"),
@@ -145,12 +147,25 @@ def stage_contract(_: argparse.Namespace) -> int:
             "kv_dtype": engine.get("kv_cache"),
             "max_context": engine.get("max_context"),
             "kv_capacity": engine.get("kv_capacity"),
-            "speculative_backend": engine.get("speculative_backend"),
+            "max_concurrency": engine.get("max_concurrency"),
+            "speculative_backend": backend,
             "draft_tokens": engine.get("speculative_draft_window"),
             "proposal_head": engine.get("proposal_head"),
             "prefix_reuse": engine.get("prefix_reuse"),
             "cuda_graph": engine.get("cuda_graph"),
             "prefill_chunk": engine.get("prefill_chunk"),
+            "preserve_thinking": server.get("default_preserve_thinking"),
+            "sampling_capabilities": {
+                "mtp": backend == "mtp",
+                "dflash": backend == "dflash",
+                "dflash2": backend == "dflash2",
+                "lm_head_draft": engine.get("proposal_head") == "optimized",
+                "prefix_reuse": bool(engine.get("prefix_reuse")),
+                "cuda_graph": bool(engine.get("cuda_graph")),
+                "thinking": start.get("sampling_defaults", {}).get("thinking") is not None,
+                "streaming": True,
+                "tool_calls": True,
+            },
             "binary": {
                 "sha256": os.environ.get("NINFER_BINARY_SHA256"),
                 "size_bytes": os.environ.get("NINFER_BINARY_SIZE_BYTES"),

@@ -17,6 +17,17 @@
     "cuda_graph": true,
     "prefill_chunk": 1024,
     "preserve_thinking": true,
+    "sampling_capabilities": {
+      "mtp": true,
+      "dflash": false,
+      "dflash2": false,
+      "lm_head_draft": true,
+      "prefix_reuse": true,
+      "cuda_graph": true,
+      "thinking": true,
+      "streaming": true,
+      "tool_calls": true
+    },
     "sampling_defaults": {
       "greedy": false,
       "omitted_seed": "random",
