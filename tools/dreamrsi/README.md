@@ -162,12 +162,22 @@ unchanged, and writes owner-only capsules under
 Captured bodies never enter Git. Descriptors carry hashes and operational labels
 only.
 
+`start` refuses to run while another window holds the capture port, and it only
+reports success once the proxy actually owns that port. `windows` lists every
+window with its request count, and `merge` combines the windows into one
+descriptor manifest:
+
+```sh
+bash tools/dreamrsi/ops/capture_window.sh windows
+bash tools/dreamrsi/ops/capture_window.sh merge ~/corpus-manifest.jsonl
+```
+
 The corpus planner samples whole sessions, keeps disjoint holdout groups,
 replays each selected session's captured prefix with explicit warmups, and never
 rewrites a request body or its output budget:
 
 ```sh
-python3.11 -m tools.dreamrsi corpus plan --manifest <descriptors.jsonl> \
+python3.11 -m tools.dreamrsi corpus plan --manifest ~/corpus-manifest.jsonl \
   --seed 41 --request-budget 64 --cache-recipe-id prefix-reuse-default-v1 \
   --output <plan.json>
 ```
