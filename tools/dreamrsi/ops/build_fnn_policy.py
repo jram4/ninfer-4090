@@ -29,6 +29,9 @@ REMOTE_PYTHON = ("/home/aramirezfamily/.local/share/uv/python/"
 
 def build_specification(args: argparse.Namespace) -> dict:
     plan = args.plan
+    # The stage runs on the evaluation host, so the plan is referenced by the
+    # path it has there.
+    remote_plan = args.remote_plan or str(Path(DEFAULT_REMOTE_ROOT) / "corpus-plan-screen.json")
     contract = json.loads(args.contract.read_text(encoding="utf-8"))
     stages = [
         {
@@ -78,7 +81,7 @@ def build_specification(args: argparse.Namespace) -> dict:
             "name": name,
             "argv": [
                 REMOTE_PYTHON, "{trusted_harness}/project_stages.py", name,
-                "--plan", str(plan),
+                "--plan", remote_plan,
                 "--capsule-root", "/",
                 "--binary", "{build_dir}/apps/ninfer-serve",
                 "--baseline-binary", args.baseline_binary,
@@ -109,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--contract", required=True, type=Path)
     parser.add_argument("--plan", required=True, type=Path)
     parser.add_argument("--baseline-binary", required=True)
+    parser.add_argument("--remote-plan", default="",
+                        help="path of the corpus plan on the evaluation host")
     parser.add_argument("--harness", default="",
                         help="ignored; the transport resolves the trusted harness at run time")
     parser.add_argument("--baseline-id", default="baseline-sampled-k7-70ebb12")
