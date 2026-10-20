@@ -125,6 +125,46 @@ require_free_port() {
   fi
 }
 
+# The background service resolves a session's provider endpoint when the
+# session is created. A session created before the service notices the
+# configuration change keeps the old endpoint, so the window is not ready
+# until the service itself reports the capture port.
+server_endpoint() {
+  opencode api get /api/config 2>/dev/null | python3.11 -c '
+import json
+import sys
+
+try:
+    documents = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+for item in documents if isinstance(documents, list) else []:
+    if not isinstance(item, dict) or item.get("type") != "document":
+        continue
+    info = item.get("info", {})
+    providers = info.get("provider") or info.get("providers") or {}
+    fnn = providers.get("fnn") if isinstance(providers, dict) else None
+    if isinstance(fnn, dict):
+        print((fnn.get("settings") or {}).get("baseURL", ""))
+' 2>/dev/null || true
+}
+
+wait_for_server_endpoint() {
+  local expected="http://100.119.241.20:${PORT}/v1"
+  local waited=0 seen=""
+  while [ "${waited}" -lt 30 ]; do
+    seen="$(server_endpoint)"
+    if [ "${seen}" = "${expected}" ]; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  printf 'ERROR: the OpenCode service still reports %s for the fnn provider.\n' "${seen:-unknown}" >&2
+  printf 'A session started now would bypass the capture. Try again in a moment.\n' >&2
+  return 1
+}
+
 start() {
   local label="${1:?session label required}"
   local stratum="${2:-live-coding}"
@@ -177,6 +217,10 @@ start() {
   fi
   printf '%s\n' "${safe} ${pid} ${stratum} ${remote_dir}" > "${STATE_FILE}"
   redirect_configs "${STATE_FILE}"
+  if ! wait_for_server_endpoint; then
+    stop >/dev/null 2>&1 || true
+    exit 1
+  fi
   printf 'capture window STARTED\n'
   printf '  label    : %s\n' "${safe}"
   printf '  stratum  : %s\n' "${safe}"
