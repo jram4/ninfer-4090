@@ -170,29 +170,44 @@ def _compatibility_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _candidate_binary_identity(core: Any, stage: Mapping[str, Any], report: Mapping[str, Any],
+def _candidate_binary_identity(core: Any, build_dir: Path, report: Mapping[str, Any],
                                paths: Mapping[str, Path | str]) -> dict[str, Any]:
-    """Return the independently hashed identity of the built candidate binary."""
+    """Hash the built candidate binary independently of any stage claim.
+
+    The build stage names the binary it produced; the evaluator hashes the
+    file itself and requires the two to agree, so a stage cannot pass a
+    different artifact than the one it actually built.
+    """
+    binary = build_dir / "apps" / "ninfer-serve"
+    if binary.is_symlink() or not binary.is_file():
+        raise _PipelineFault("inconclusive", "build", None,
+                             "the build stage did not produce apps/ninfer-serve")
+    info = binary.lstat()
+    observed = {
+        "sha256": core.sha256_file(binary).lower(),
+        "size_bytes": info.st_size,
+        "path": str(binary),
+    }
     references = report.get("evidence")
     if not isinstance(references, Mapping) or "candidate_binary" not in references:
-        raise _PipelineFault("inconclusive", stage["name"], None,
-                             "build stage did not report a candidate binary")
+        raise _PipelineFault("inconclusive", "build", None,
+                             "the build stage did not publish its candidate binary")
     reference = references["candidate_binary"]
     if not isinstance(reference, Mapping):
-        raise _PipelineFault("inconclusive", stage["name"], None,
-                             "build stage reported an invalid candidate binary reference")
+        raise _PipelineFault("inconclusive", "build", None,
+                             "the build stage published an invalid candidate binary reference")
     attempt_dir = paths["attempt_dir"]
     assert isinstance(attempt_dir, Path)
     try:
-        source = _safe_relative_file(attempt_dir, str(reference.get("path")))
-        info = source.lstat()
+        declared = _safe_relative_file(attempt_dir, str(reference.get("path")))
     except (OSError, ValueError, _EvidenceError) as exc:
-        raise _PipelineFault("inconclusive", stage["name"], None,
-                             f"candidate binary could not be identified: {exc}") from exc
-    return {
-        "sha256": core.sha256_file(source).lower(),
-        "size_bytes": info.st_size,
-    }
+        raise _PipelineFault("inconclusive", "build", None,
+                             f"the candidate binary reference could not be resolved: {exc}") from exc
+    declared_hash = core.sha256_file(declared).lower()
+    if declared_hash != observed["sha256"] or declared.resolve() != binary.resolve():
+        raise _PipelineFault("regression", "build", "candidate",
+                             "the published candidate binary differs from the built output")
+    return observed
 
 
 def _verify_observed_contract(core: Any, expected: Mapping[str, Any], observed: Mapping[str, Any],
@@ -897,7 +912,8 @@ def _replace_known_placeholders(argument: str, values: Mapping[str, str]) -> str
 def _stage_environment(stage: Mapping[str, Any], paths: Mapping[str, Path | str],
                        submission: Mapping[str, Any], policy: Mapping[str, Any],
                        build_key: str, attempt_id: str,
-                       raw_dir: Path) -> dict[str, str]:
+                       raw_dir: Path,
+                       candidate_binary: Mapping[str, Any] | None = None) -> dict[str, str]:
     evidence_dir = paths["evidence_dir"]
     assert isinstance(evidence_dir, Path)
     evidence_path = evidence_dir / stage["evidence_path"]
@@ -923,6 +939,28 @@ def _stage_environment(stage: Mapping[str, Any], paths: Mapping[str, Path | str]
         "NINFER_STAGE_REQUIRED_EVIDENCE": json.dumps(list(stage["required_evidence"])),
         "NINFER_STAGE_CRITERIA": json.dumps(stage["criteria"], sort_keys=True),
     })
+    if candidate_binary is not None:
+        # The identity of the binary the evaluator itself hashed, so a later
+        # stage can report what it actually served and be checked against it.
+        environment["NINFER_BINARY_SHA256"] = str(candidate_binary["sha256"])
+        environment["NINFER_BINARY_SIZE_BYTES"] = str(candidate_binary["size_bytes"])
+        environment["NINFER_CANDIDATE_BINARY_PATH"] = str(candidate_binary["path"])
+    environment["NINFER_RELEASE_SOURCE_COMMIT"] = str(
+        submission["source"].get("git_commit", ""))
+    contract = policy.get("contract")
+    if isinstance(contract, Mapping):
+        artifact = contract.get("model_artifact")
+        template = contract.get("template")
+        if isinstance(artifact, Mapping):
+            environment["NINFER_MODEL_SHA256"] = str(artifact.get("sha256", ""))
+            if artifact.get("path"):
+                environment["NINFER_MODEL_ARTIFACT"] = str(artifact["path"])
+            if artifact.get("size_bytes"):
+                environment["NINFER_MODEL_SIZE_BYTES"] = str(artifact["size_bytes"])
+        if isinstance(template, Mapping):
+            environment["NINFER_TEMPLATE_SHA256"] = str(template.get("sha256", ""))
+            if template.get("path"):
+                environment["NINFER_CHAT_TEMPLATE"] = str(template["path"])
     configured = stage["criteria"].get("env", {})
     if not isinstance(configured, Mapping):
         raise EvaluationError(f"{stage['name']} env must be a JSON object")
@@ -1021,11 +1059,28 @@ def _snapshot_required_evidence(core: Any, report: Mapping[str, Any], *, stage: 
                                 receipt_evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
     references = report.get("evidence")
     required = stage["required_evidence"]
-    if not isinstance(references, Mapping) or set(references) != set(required):
+    if not isinstance(references, Mapping):
+        raise _EvidenceError("stage report does not provide exactly its required evidence names",
+                             inconclusive=True)
+    status = report.get("status")
+    failing = isinstance(status, str) and status.lower() in {
+        "rejected", "regression", "fail", "failed"
+    }
+    published = set(references)
+    if failing:
+        # A stage that reports a failing gate need not produce every artifact
+        # it would have produced on success. Each artifact it does publish is
+        # still hashed and verified.
+        if not published <= set(required):
+            raise _EvidenceError("stage report published evidence outside its required names",
+                                 inconclusive=True)
+    elif published != set(required):
         raise _EvidenceError("stage report does not provide exactly its required evidence names",
                              inconclusive=True)
     snapshots: list[dict[str, Any]] = []
     for index, name in enumerate(required):
+        if name not in published:
+            continue
         reference = references[name]
         if not isinstance(reference, Mapping) or set(reference) != {"path", "sha256"}:
             raise _EvidenceError(f"raw evidence reference {name!r} must contain path and sha256",
@@ -1155,8 +1210,14 @@ def _validate_evidence_report(core: Any, *, report_path: Path, artifact_path: Pa
         "inconclusive", "noise", "noisy", "underpowered", "insufficient"
     }:
         raise _EvidenceError("stage evidence is noisy or inconclusive", inconclusive=True)
-    if isinstance(report_status, str) and report_status.lower() in {"regression", "fail", "failed"}:
-        raise _EvidenceError("stage evidence reports a failing gate")
+    if isinstance(report_status, str) and report_status.lower() in {
+        "rejected", "regression", "fail", "failed"
+    }:
+        # The stage ran and reported a failing gate. That is a candidate
+        # failure, not missing or unusable evidence.
+        raise _PipelineFault("regression", stage["name"], "candidate",
+                             f"trusted {stage['name']} stage reported a failing gate: "
+                             f"{report_status}")
 
     criteria = stage["criteria"]
     for path, expected in criteria["equals"].items():
@@ -1205,7 +1266,8 @@ def _run_stage(core: Any, stage: Mapping[str, Any], *, paths: Mapping[str, Path 
                build_key: str, cancelled: Cancelled,
                receipt_evidence: list[dict[str, Any]],
                stage_diagnostics: list[dict[str, Any]],
-               gpu_admissions: list[dict[str, Any]]) -> dict[str, Any]:
+               gpu_admissions: list[dict[str, Any]],
+               candidate_binary: Mapping[str, Any] | None = None) -> dict[str, Any]:
     source_dir = paths["source_dir"]
     build_dir = paths["build_dir"]
     run_dir = paths["run_dir"]
@@ -1223,7 +1285,7 @@ def _run_stage(core: Any, stage: Mapping[str, Any], *, paths: Mapping[str, Path 
     raw_dir.mkdir(mode=0o700)
     argv = _expand_argv(stage, paths, submission, policy, build_key, raw_dir)
     environment = _stage_environment(
-        stage, paths, submission, policy, build_key, attempt_id, raw_dir
+        stage, paths, submission, policy, build_key, attempt_id, raw_dir, candidate_binary
     )
     log_path = run_dir / f"{stage['name']}.log"
     criteria = stage["criteria"]
@@ -1626,6 +1688,7 @@ def evaluate_submission(
                 receipt_evidence=receipt_evidence,
                 stage_diagnostics=stage_diagnostics,
                 gpu_admissions=gpu_admissions,
+                candidate_binary=candidate_binary,
             )
             gates_seen.update(stage["criteria"]["gates"])
             if stage["criteria"].get("observes_contract") is True:
@@ -1648,7 +1711,7 @@ def evaluate_submission(
                 stage_diagnostics[-1]["contract_verification"] = contract_verification
                 contract_seen = True
             elif stage["name"] == "build":
-                candidate_binary = _candidate_binary_identity(core, stage, report, paths)
+                candidate_binary = _candidate_binary_identity(core, build_dir, report, paths)
 
         if build_identity is not None:
             build_stage = next(stage for stage in stages if stage["name"] == "build")

@@ -193,7 +193,8 @@ def _stage_command(stage: str, *, omit_report: bool = False,
         code = "raise SystemExit(0)"
     else:
         candidate_binary = (
-            "b=os.path.join(e['NINFER_BUILD_DIR'],'ninfer-serve');"
+            "b=os.path.join(e['NINFER_BUILD_DIR'],'apps','ninfer-serve');"
+            "os.makedirs(os.path.dirname(b),exist_ok=True);"
             "open(b,'wb').write(b'candidate-binary');os.chmod(b,0o755);"
             "binary={'sha256':hashlib.sha256(b'candidate-binary').hexdigest(),"
             "'size_bytes':len(b'candidate-binary')};"

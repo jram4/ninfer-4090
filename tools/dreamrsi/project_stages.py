@@ -63,6 +63,16 @@ def _toolchain_env() -> dict[str, str]:
         parts.append(environment["PATH"])
     environment["PATH"] = ":".join(parts)
     environment.setdefault("CUDACXX", str(cuda / "nvcc"))
+    # The system pkg-config resolves libcurl 7.81 and FFmpeg 58, both below
+    # what this source requires. The verified read-only prefix has curl 8.21
+    # and the FFmpeg 62 family.
+    prefix = os.environ.get("NINFER_PKG_CONFIG_PATH") or (
+        "/home/aramirezfamily/josh/ninfer-wt-spec-integration/build-integration-isolated/"
+        "vcpkg_installed/x64-linux/lib/pkgconfig"
+    )
+    if Path(prefix).is_dir():
+        existing = environment.get("PKG_CONFIG_PATH")
+        environment["PKG_CONFIG_PATH"] = f"{prefix}:{existing}" if existing else prefix
     return environment
 
 
@@ -93,20 +103,23 @@ def stage_build(_: argparse.Namespace) -> int:
         "-DNINFER_BUILD_APPS=ON", "-DNINFER_BUILD_BENCHMARKS=ON", "-DBUILD_TESTING=ON",
     ], timeout=1800, env=environment)
     if configure.returncode != 0:
-        _artifact("build-configure.log", configure.stdout + configure.stderr)
+        log = _artifact("build-configure.log", configure.stdout + configure.stderr)
         report["status"] = "rejected"
         report["build_key"] = os.environ.get("NINFER_BUILD_KEY")
-        _write_build_report(report, {"build_evidence": _raw_path("build-configure.log")})
+        report["detail"] = "the build did not configure"
+        stage_support._publish(report, {"build_evidence": log})
+        stage_support._write(report)
         return 0
 
-    compiled = _run(["cmake", "--build", str(build), "-j"], timeout=7200, env=environment)
-    _artifact("build.log", compiled.stdout + compiled.stderr)
+    compiled = _run(["cmake", "--build", str(build), "-j"], timeout=10800, env=environment)
+    log = _artifact("build.log", compiled.stdout + compiled.stderr)
     if compiled.returncode != 0:
         report["status"] = "rejected"
         report["build_key"] = os.environ.get("NINFER_BUILD_KEY")
-        _write_build_report(report, {"build_evidence": _raw_path("build.log")})
+        report["detail"] = "the build did not compile"
+        stage_support._publish(report, {"build_evidence": log})
+        stage_support._write(report)
         return 0
-
     binary = build / "apps" / "ninfer-serve"
     if not binary.is_file():
         raise ProjectStageError("the build did not produce apps/ninfer-serve")
@@ -120,18 +133,15 @@ def stage_build(_: argparse.Namespace) -> int:
     report["status"] = "pass"
     report["build_key"] = os.environ.get("NINFER_BUILD_KEY")
     report["build_identity"] = {"flags": observed_flags, "dependencies": []}
-    artifacts = {
-        "build_evidence": _raw_path("build.log"),
+    # The evaluator hashes the built binary itself; the stage publishes a
+    # reference so the two can be compared.
+    report["candidate_binary_path"] = str(binary)
+    stage_support._publish(report, {
+        "build_evidence": log,
         "candidate_binary": binary,
-    }
-    stage_support._publish(report, artifacts)
+    })
     stage_support._write(report)
     return 0
-
-
-def _write_build_report(report: dict[str, Any], artifacts: dict[str, Path]) -> None:
-    stage_support._publish(report, artifacts)
-    stage_support._write(report)
 
 
 # --------------------------------------------------------------------- correctness
@@ -325,11 +335,181 @@ def stage_full(args: argparse.Namespace) -> int:
                     report, "full_evidence", {"holdout_result": "pass"})
 
 
+def stage_smoke(_: argparse.Namespace) -> int:
+    """Start the candidate's own Serve and report what it actually served.
+
+    The observed contract comes from the candidate process, not from a
+    pre-existing endpoint, so a live service can never stand in for a
+    candidate run.
+    """
+    report = stage_support._binding()
+    build = Path(os.environ["NINFER_BUILD_DIR"])
+    binary = Path(os.environ.get("NINFER_CANDIDATE_BINARY_PATH") or (build / "apps" / "ninfer-serve"))
+    if not binary.is_file():
+        raise ProjectStageError("the candidate binary is missing")
+    model = Path(os.environ["NINFER_MODEL_ARTIFACT"])
+    template = Path(os.environ["NINFER_CHAT_TEMPLATE"])
+    log_path = _raw_path("smoke-serve.jsonl")
+    port = int(os.environ.get("NINFER_SMOKE_PORT", "18099"))
+    process = _start_serve(binary, model, template, log_path, port)
+    try:
+        completion = _smoke_request(port)
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=60)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            process.kill()
+    start = _first_server_start(log_path)
+    if start is None:
+        raise ProjectStageError("the candidate Serve produced no server_start event")
+    served = start.get("artifact", {})
+    expected_size = os.environ.get("NINFER_MODEL_SIZE_BYTES")
+    if expected_size and str(served.get("size_bytes")) != expected_size:
+        raise ProjectStageError(
+            f"the candidate served an artifact of size {served.get('size_bytes')}, "
+            f"not the locked {expected_size}")
+    binary_sha256 = _sha256_file(binary)
+    binary_size = binary.stat().st_size
+    observed = _observed_contract(start, binary_sha256, binary_size)
+    report["observed_contract"] = observed
+    report["status"] = "pass" if completion.get("ok") else "rejected"
+    report["task_result"] = "pass" if completion.get("ok") else "fail"
+    report["smoke_response"] = {key: completion[key] for key in ("status", "ok", "completion_tokens")}
+    _artifact("smoke-response.json", json.dumps(completion, sort_keys=True))
+    stage_support._publish(report, {
+        "smoke_evidence": _raw_path("smoke-response.json"),
+        "contract_observation": _raw_path("smoke-serve.jsonl"),
+    })
+    stage_support._write(report)
+    return 0
+
+
+def _smoke_request(port: int) -> dict[str, Any]:
+    import http.client
+
+    body = json.dumps({
+        "model": "qwen/qwen3.8-27b",
+        "messages": [{"role": "user", "content": "Reply with the single word: ready"}],
+        "max_tokens": 16,
+        "temperature": 0.0,
+    })
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=300)
+    try:
+        connection.request("POST", "/v1/chat/completions", body=body,
+                           headers={"content-type": "application/json"})
+        response = connection.getresponse()
+        payload = response.read()
+        status = response.status
+    except OSError as exc:
+        return {"ok": False, "status": 0, "error": str(exc)[:200], "completion_tokens": 0}
+    finally:
+        connection.close()
+    tokens = 0
+    try:
+        parsed = json.loads(payload)
+        usage = parsed.get("usage", {})
+        tokens = int(usage.get("completion_tokens", 0) or 0)
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        parsed = None
+    return {
+        "ok": status == 200 and tokens > 0,
+        "status": status,
+        "completion_tokens": tokens,
+        "response_sha256": _sha256_bytes(payload),
+    }
+
+
+def _first_server_start(log_path: Path) -> dict[str, Any] | None:
+    if not log_path.is_file():
+        return None
+    with log_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if '"server_start"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("event") == "server_start":
+                return event
+    return None
+
+
+def _observed_contract(start: dict[str, Any], binary_sha256: str,
+                       binary_size: int) -> dict[str, Any]:
+    engine = start.get("engine", {})
+    artifact = start.get("artifact", {})
+    server = start.get("server", {})
+    environment = start.get("environment", {})
+    backend = engine.get("speculative_backend")
+    return {
+        "model_artifact": {
+            "sha256": os.environ.get("NINFER_MODEL_SHA256"),
+            "size_bytes": artifact.get("size_bytes"),
+        },
+        "runtime": {
+            "kv_dtype": engine.get("kv_cache"),
+            "max_context": engine.get("max_context"),
+            "kv_capacity": engine.get("kv_capacity"),
+            "max_concurrency": engine.get("max_concurrency"),
+            "speculative_backend": backend,
+            "draft_tokens": engine.get("speculative_draft_window"),
+            "proposal_head": engine.get("proposal_head"),
+            "prefix_reuse": engine.get("prefix_reuse"),
+            "cuda_graph": engine.get("cuda_graph"),
+            "prefill_chunk": engine.get("prefill_chunk"),
+            "preserve_thinking": server.get("default_preserve_thinking"),
+            "sampling_capabilities": {
+                "mtp": backend == "mtp",
+                "dflash": backend == "dflash",
+                "dflash2": backend == "dflash2",
+                "lm_head_draft": engine.get("proposal_head") == "optimized",
+                "prefix_reuse": bool(engine.get("prefix_reuse")),
+                "cuda_graph": bool(engine.get("cuda_graph")),
+                "thinking": start.get("sampling_defaults", {}).get("thinking") is not None,
+                "streaming": True,
+                "tool_calls": True,
+            },
+            "binary": {"sha256": binary_sha256, "size_bytes": binary_size},
+            "release_source_commit": os.environ.get("NINFER_RELEASE_SOURCE_COMMIT"),
+            "sampling_defaults": start.get("sampling_defaults"),
+        },
+        "template": {"sha256": os.environ.get("NINFER_TEMPLATE_SHA256")},
+        "tokenizer": {
+            "embedded_in_model_artifact_sha256": os.environ.get("NINFER_MODEL_SHA256"),
+        },
+        "observed_environment": {
+            "gpu_name": environment.get("gpu_name"),
+            "gpu_uuid": environment.get("gpu_uuid"),
+            "cuda_runtime_version": environment.get("cuda_runtime_version"),
+            "cuda_driver_version": environment.get("cuda_driver_version"),
+        },
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(payload).hexdigest()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("build")
     commands.add_parser("correctness")
+    commands.add_parser("smoke")
     replay = commands.add_parser("replay")
     replay.add_argument("--plan", required=True)
     replay.add_argument("--split", choices=("screen", "holdout"), default="screen")
@@ -348,6 +528,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "build": stage_build,
         "correctness": stage_correctness,
+        "smoke": stage_smoke,
         "replay": stage_replay,
         "screen": stage_screen,
         "full": stage_full,
