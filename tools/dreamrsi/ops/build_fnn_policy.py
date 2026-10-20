@@ -89,9 +89,9 @@ def build_specification(args: argparse.Namespace) -> dict:
             ],
             "timeout_seconds": 14400,
             "required_evidence": [evidence],
-            "criteria": {"equals": {"status": "pass"}, **extra},
             # A fixed generation seed, so the two arms perform the same work.
-            "env": {"NINFER_EVAL_SEED": args.seed},
+            "criteria": {"equals": {"status": "pass"}, **extra,
+                         "env": {"NINFER_EVAL_SEED": args.seed}},
         }
         if gate:
             stage["gates"] = [gate]
