@@ -232,11 +232,14 @@ def _session_bundle(
         if row["sequence"] > warmup_requests
         and (output_budget_filter is None or row["output_budget"] == output_budget_filter)
     ]
-    if len(candidates) < samples_per_session:
-        if output_budget_filter is not None and not candidates:
+    if not candidates:
+        if output_budget_filter is not None:
             return None, "no_matching_output_budget"
-        return None, "insufficient_measured_requests"
+        return None, "no_measured_requests"
 
+    # `samples_per_session` caps how many requests are measured from a
+    # session. A short session is still a valid session and contributes the
+    # requests it has; discarding it would throw away real traffic.
     measured = candidates[:samples_per_session]
     last_sequence = measured[-1]["sequence"]
     prefix = [row for row in ordered if row["sequence"] <= last_sequence]
