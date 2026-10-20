@@ -1,7 +1,10 @@
 [Unit]
 Description=Cinference RTX 4090 Qwen3.8-27B inference server (ada-k10-perf)
-After=network-online.target
-Wants=network-online.target
+# The server binds the Tailscale address, which does not exist until
+# tailscaled has configured the interface. Without this ordering the unit
+# failed at boot with "cannot bind" and exhausted its restart limit.
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
 Before=litellm.service
 Conflicts=ninfer-qwen38-4090.service
 StartLimitIntervalSec=120

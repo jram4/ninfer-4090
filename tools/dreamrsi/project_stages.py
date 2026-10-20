@@ -341,18 +341,104 @@ def stage_replay(args: argparse.Namespace) -> int:
     return 0
 
 
-def stage_screen(args: argparse.Namespace) -> int:
+def stage_replay_to(args: argparse.Namespace) -> int:
+    """Replay a plan against an endpoint that is already serving.
+
+    This produces the baseline arm: the same captured requests, the same plan
+    and the same cache recipe, sent to a server that is already running the
+    qualified release. No server is started or stopped here.
+    """
+    plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+    rows = _replay_to_rows(plan, args.split, Path(args.capsule_root), args.upstream,
+                            Path(args.rows))
+    print(json.dumps({"replayed": len(rows), "rows": str(args.rows)}))
+    return 0
+
+
+def _replay_to_rows(plan: dict[str, Any], split: str, capsule_root: Path,
+                    upstream: str, rows_path: Path) -> list[dict[str, Any]]:
+    try:
+        from .replay import replay_capsule
+    except ImportError:  # direct module execution
+        from replay import replay_capsule  # type: ignore[no-redef]
+
+    rows: list[dict[str, Any]] = []
+    for entry in plan["splits"][split]:
+        capsule = Path(entry["capsule_path"])
+        if not capsule.is_absolute():
+            capsule = capsule_root / capsule
+        outcome = replay_capsule(capsule, upstream_url=upstream, timeout=900)
+        rows.append({
+            "schema_version": 1,
+            "plan_id": plan["plan_id"],
+            "corpus_id": plan["corpus_id"],
+            "split": split,
+            "capsule_id": entry["capsule_id"],
+            "capsule_sha256": entry["capsule_sha256"],
+            "session_id": entry["session_id"],
+            "request_sha256": entry.get("request_sha256"),
+            "identity_scope": entry["identity_scope"],
+            "output_budget": entry["output_budget"],
+            "cache_recipe_id": plan["cache"]["cache_recipe_id"],
+            "cache_state": plan["cache"]["cache_state"],
+            "warmup_requests": entry.get("session_warmup_requests", 0),
+            "complete": bool(outcome.get("complete")),
+            "error": int(outcome.get("status", 0)) >= 400,
+            "truncated": False,
+            "finish_reason": None,
+            "committed_tokens": 0,
+            "ttft_seconds": None,
+            "wall_seconds": None,
+            "output_work": {"completion_tokens": 0},
+            "runtime_identity": {
+                "artifact_sha256": os.environ.get("NINFER_MODEL_SHA256", "0" * 64),
+                "runtime_version": os.environ.get("NINFER_RUNTIME_ID", "baseline"),
+            },
+        })
+    rows_path.parent.mkdir(parents=True, exist_ok=True)
+    rows_path.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8")
+    return rows
+
+
+def _candidate_arm(args: argparse.Namespace, split: str, evidence_name: str) -> int:
+    """Replay a plan with the candidate's own server and reduce the pair.
+
+    The candidate starts its own Serve from the binary the build stage
+    produced, replays the plan's capsules against it, and reduces the result
+    against the stored baseline rows for the same plan.
+    """
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
     report = stage_support._binding()
-    return _compare(plan, "screen", Path(args.baseline_rows), Path(args.candidate_rows),
-                    report, "screen_evidence")
+    binary = Path(os.environ.get("NINFER_CANDIDATE_BINARY_PATH") or args.binary)
+    model = Path(args.model)
+    template = Path(args.template)
+    rows_path = Path(args.rows)
+    log_path = rows_path.with_suffix(".serve.jsonl")
+    port = int(os.environ.get("NINFER_REPLAY_PORT", "18099"))
+    process = _start_serve(binary, model, template, log_path, port)
+    try:
+        rows = _replay_to_rows(plan, split, Path(args.capsule_root),
+                               f"http://127.0.0.1:{port}", rows_path)
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=60)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            process.kill()
+    _merge_serve_telemetry(rows, log_path)
+    rows_path.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8")
+    return _compare(plan, split, Path(args.baseline_rows), rows_path, report, evidence_name,
+                    {"holdout_result": "pass"} if split == "holdout" else None)
+
+
+def stage_screen(args: argparse.Namespace) -> int:
+    return _candidate_arm(args, "screen", "screen_evidence")
 
 
 def stage_full(args: argparse.Namespace) -> int:
-    plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
-    report = stage_support._binding()
-    return _compare(plan, "holdout", Path(args.baseline_rows), Path(args.candidate_rows),
-                    report, "full_evidence", {"holdout_result": "pass"})
+    return _candidate_arm(args, "holdout", "full_evidence")
 
 
 def stage_smoke(_: argparse.Namespace) -> int:
@@ -539,17 +625,28 @@ def main(argv: list[str] | None = None) -> int:
     replay.add_argument("--template", required=True)
     replay.add_argument("--port", type=int, default=18099)
     replay.add_argument("--rows", required=True)
+    replay_to = commands.add_parser("replay-to")
+    replay_to.add_argument("--plan", required=True)
+    replay_to.add_argument("--split", choices=("screen", "holdout"), default="screen")
+    replay_to.add_argument("--capsule-root", required=True)
+    replay_to.add_argument("--upstream", required=True)
+    replay_to.add_argument("--rows", required=True)
     for name in ("screen", "full"):
         command = commands.add_parser(name)
         command.add_argument("--plan", required=True)
+        command.add_argument("--capsule-root", required=True)
+        command.add_argument("--binary", required=True)
+        command.add_argument("--model", required=True)
+        command.add_argument("--template", required=True)
         command.add_argument("--baseline-rows", required=True)
-        command.add_argument("--candidate-rows", required=True)
+        command.add_argument("--rows", required=True)
     args = parser.parse_args(argv)
     handlers = {
         "build": stage_build,
         "correctness": stage_correctness,
         "smoke": stage_smoke,
         "replay": stage_replay,
+        "replay-to": stage_replay_to,
         "screen": stage_screen,
         "full": stage_full,
     }

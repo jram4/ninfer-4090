@@ -122,7 +122,8 @@ def _read_harness_files(root: Path, contracts_path: Path | None) -> tuple[Path, 
     # The stage programs and the reduction they call must be part of the
     # trusted harness: a remote stage that imports them must be able to prove
     # their identity.
-    for optional in ("stage.py", "quick_eval.py", "corpus.py", "policy.py", "project_stages.py"):
+    for optional in ("stage.py", "quick_eval.py", "corpus.py", "policy.py", "project_stages.py",
+                     "replay.py", "capture.py"):
         candidate = package / optional
         if candidate.is_file() and not candidate.is_symlink():
             files[optional] = candidate
