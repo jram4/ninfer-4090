@@ -228,10 +228,10 @@ class SSHExecutor:
                 "purpose": f"install trusted {relative}; never from candidate archive",
             })
         commands.append({
-            "argv": ["ssh", "-T", self.alias, shlex.join([
-                "chmod", "400", *(self.remote_harness_root / name).as_posix()
-                for name in sorted(self.harness_files)
-            ])],
+            "argv": ["ssh", "-T", self.alias, shlex.join(
+                ["chmod", "400"] + [(self.remote_harness_root / name).as_posix()
+                                   for name in sorted(self.harness_files)]
+            )],
             "purpose": "seal trusted evaluator modules read-only",
         })
         return {
