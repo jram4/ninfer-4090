@@ -373,6 +373,9 @@ def make_plan(
     matching_sessions_by_stratum: dict[str, set[str]] = {stratum: set() for stratum in strata}
     for session_rows in by_session.values():
         stratum = session_rows[0]["stratum"]
+        if stratum not in candidates_by_stratum:
+            # A stratum the plan does not cover is left out entirely.
+            continue
         if output_budget is None or any(row["output_budget"] == output_budget for row in session_rows):
             matching_sessions_by_stratum[stratum].add(session_rows[0]["session_id"])
         bundle, failure = _session_bundle(
