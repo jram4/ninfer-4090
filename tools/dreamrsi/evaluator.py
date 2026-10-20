@@ -638,6 +638,9 @@ def _extracted_source_manifest(core: Any, source_dir: Path) -> list[dict[str, An
                 raise _SourceInputError(f"unsupported extracted source object: {relative}")
 
     visit(source_dir)
+    # The frozen manifest is ordered by path, which is not the same order a
+    # directory walk produces. Compare like with like.
+    entries.sort(key=lambda entry: entry["path"])
     return entries
 
 
