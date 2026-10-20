@@ -189,7 +189,10 @@ def stage_compare(_: argparse.Namespace) -> int:
     candidate = os.environ.get("NINFER_CANDIDATE_RESULTS")
     if not baseline or not candidate:
         raise StageError("NINFER_BASELINE_RESULTS and NINFER_CANDIDATE_RESULTS are required")
-    from .quick_eval import reduce_pair
+    try:
+        from .quick_eval import reduce_pair
+    except ImportError:  # direct module execution
+        from quick_eval import reduce_pair  # type: ignore[no-redef]
 
     plan_path = os.environ.get("NINFER_PLAN")
     if not plan_path:
