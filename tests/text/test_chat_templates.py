@@ -98,6 +98,9 @@ class ChatTemplates(unittest.TestCase):
             messages=[message("user", "hello")], add_generation_prompt=True
         )
         self.assertIn("Reasoning effort is set to xhigh.", default)
+        high = self.render("qwen3_8", [message("user", "hello")], reasoning_effort="high")
+        xhigh = self.render("qwen3_8", [message("user", "hello")], reasoning_effort="xhigh")
+        self.assertEqual(high, xhigh)
         self.assertTrue(default.endswith("<|im_start|>assistant\n<think>\n"))
 
     def test_tools_and_instruction_preamble(self):
