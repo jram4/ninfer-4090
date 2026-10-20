@@ -1,0 +1,57 @@
+{
+  "model_artifact": {
+    "path": "/home/aramirezfamily/josh/cinference-4090/models/qwen3_8_27b.ablit-wxp.ninfer",
+    "sha256": "b7c6693244cf7ab08554fff41c4f3c67695b6ec388c99eed6f12e0e71046fda8",
+    "size_bytes": 18210704128,
+    "formats": ["bf16", "fp32", "int32", "q4_g64_fp16", "q5_g64_fp16", "q8_g32_fp16"]
+  },
+  "runtime": {
+    "max_context": 188416,
+    "kv_capacity": 188416,
+    "kv_dtype": "k8v4",
+    "max_concurrency": 1,
+    "speculative_backend": "mtp",
+    "draft_tokens": 7,
+    "proposal_head": "optimized",
+    "prefix_reuse": true,
+    "cuda_graph": true,
+    "prefill_chunk": 1024,
+    "preserve_thinking": true,
+    "sampling_defaults": {
+      "greedy": false,
+      "omitted_seed": "random",
+      "non_thinking": {
+        "frequency_penalty": 0.0,
+        "min_p": 0.0,
+        "presence_penalty": 1.5,
+        "temperature": 0.699999988079071,
+        "top_k": 20,
+        "top_p": 0.800000011920929
+      },
+      "thinking": {
+        "frequency_penalty": 0.0,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "temperature": 1.0,
+        "top_k": 20,
+        "top_p": 0.949999988079071
+      },
+      "server_overrides": {
+        "frequency_penalty": null,
+        "min_p": null,
+        "presence_penalty": null,
+        "seed": null,
+        "temperature": null,
+        "top_k": null,
+        "top_p": null
+      }
+    }
+  },
+  "template": {
+    "path": "/home/aramirezfamily/josh/cinference-4090/releases/sampled-mtp-20260924-70ebb12/qwen3_8.jinja",
+    "sha256": "ab3f998ebacb74ea1b4f7e5ca2755b0def835f4c47ddf3cff44bc5d4a1a1f3c5"
+  },
+  "tokenizer": {
+    "embedded_in_model_artifact_sha256": "b7c6693244cf7ab08554fff41c4f3c67695b6ec388c99eed6f12e0e71046fda8"
+  }
+}

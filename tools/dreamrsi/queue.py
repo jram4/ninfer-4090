@@ -293,6 +293,40 @@ class Queue:
                 raise StaleClaimError(f"claim for {submission_id!r} is stale or cancelled")
         return expires
 
+    def release(
+        self,
+        submission_id: str,
+        claim_token: str,
+        reason: str = "claim released before evaluation",
+    ) -> dict[str, Any]:
+        """Return a fenced claim to FIFO, unless cancellation already won."""
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("release reason must be nonempty")
+        now = time.time()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status, claim_token, lease_expires_at FROM submissions WHERE submission_id = ?",
+                (submission_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(submission_id)
+            if not isinstance(claim_token, str) or not claim_token or row["claim_token"] != claim_token:
+                raise StaleClaimError(f"claim for {submission_id!r} is stale")
+            if row["status"] not in {"running", "cancel_requested"}:
+                raise StaleClaimError(f"submission {submission_id!r} is no longer active")
+            if row["lease_expires_at"] is None or row["lease_expires_at"] <= now:
+                raise StaleClaimError(f"claim for {submission_id!r} has expired")
+            next_status = "cancelled" if row["status"] == "cancel_requested" else "queued"
+            connection.execute(
+                """UPDATE submissions SET status = ?, claim_token = NULL,
+                   claim_worker = NULL, lease_expires_at = NULL,
+                   cancel_reason = CASE WHEN ? = 'cancelled' THEN COALESCE(cancel_reason, ?) ELSE cancel_reason END,
+                   updated_at = ? WHERE submission_id = ? AND claim_token = ?""",
+                (next_status, next_status, reason, now, submission_id, claim_token),
+            )
+        return self.get(submission_id)
+
     def finish(
         self,
         submission_id: str,

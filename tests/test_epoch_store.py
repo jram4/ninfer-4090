@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 import pytest
 
@@ -75,3 +76,22 @@ def test_budget_validation_rejects_unbounded_or_ambiguous_limits(tmp_path):
     invalid = budgets(extra="unbounded")
     with pytest.raises(EpochError, match="unknown budget"):
         store.create_epoch("bad", invalid)
+
+
+def test_schema_v1_database_migrates_additively_without_losing_epoch_events(tmp_path):
+    db = tmp_path / "epochs.sqlite3"
+    store = EpochStore(db)
+    store.create_epoch("migration-a", budgets())
+    store.append_event("migration-a", "research.note", "note:1", {"kept": True})
+    with sqlite3.connect(db) as con:
+        con.execute("DROP TABLE callback_outbox")
+        con.execute("PRAGMA user_version = 1")
+
+    migrated = EpochStore(db)
+    assert migrated.get_epoch("migration-a")["status"] == "active"
+    assert [event["event_type"] for event in migrated.list_events("migration-a")] == [
+        "epoch.started", "research.note"
+    ]
+    with migrated.connection() as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='callback_outbox'").fetchone()

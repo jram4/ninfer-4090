@@ -204,11 +204,67 @@ def _rank(seed: int, purpose: str, value: str) -> str:
     return hashlib.sha256(f"{seed}\0{purpose}\0{value}".encode("utf-8")).hexdigest()
 
 
-def _select_session_rows(rows: list[JsonObject], seed: int, samples_per_session: int) -> list[JsonObject]:
-    ordered = sorted(rows, key=lambda row: row["sequence"])
-    ranked = sorted(ordered, key=lambda row: _rank(seed, "capsule", row["capsule_id"]))
-    selected_ids = {row["capsule_id"] for row in ranked[:samples_per_session]}
-    return [row for row in ordered if row["capsule_id"] in selected_ids]
+def _capsule_reference(row: JsonObject, *, role: str) -> JsonObject:
+    return {
+        "sequence": row["sequence"],
+        "role": role,
+        "capsule_id": row["capsule_id"],
+        "capsule_path": row["capsule_path"],
+        "capsule_sha256": row["capsule_sha256"],
+        "request_sha256": row["request_sha256"],
+        "identity_scope": row["identity_scope"],
+        "output_budget": row["output_budget"],
+    }
+
+
+def _session_bundle(
+    session_rows: list[JsonObject],
+    *,
+    samples_per_session: int,
+    warmup_requests: int,
+    output_budget_filter: int | None,
+) -> tuple[JsonObject | None, str | None]:
+    """Build one replayable contiguous captured-session prefix bundle."""
+    ordered = sorted(session_rows, key=lambda row: row["sequence"])
+    candidates = [
+        row
+        for row in ordered
+        if row["sequence"] > warmup_requests
+        and (output_budget_filter is None or row["output_budget"] == output_budget_filter)
+    ]
+    if len(candidates) < samples_per_session:
+        if output_budget_filter is not None and not candidates:
+            return None, "no_matching_output_budget"
+        return None, "insufficient_measured_requests"
+
+    measured = candidates[:samples_per_session]
+    last_sequence = measured[-1]["sequence"]
+    prefix = [row for row in ordered if row["sequence"] <= last_sequence]
+    if [row["sequence"] for row in prefix] != list(range(1, last_sequence + 1)):
+        return None, "missing_captured_prefix_sequence"
+    if any(row["identity_scope"] != "exact_body_no_credentials" for row in prefix):
+        return None, "redacted_prefix_not_replayable"
+
+    measured_ids = {row["capsule_id"] for row in measured}
+    replay_sequence = [
+        _capsule_reference(
+            row,
+            role="measured" if row["capsule_id"] in measured_ids else "warmup",
+        )
+        for row in prefix
+    ]
+    return (
+        {
+            "session_id": session_rows[0]["session_id"],
+            "stratum": session_rows[0]["stratum"],
+            "measured": measured,
+            "measured_capsule_ids": [row["capsule_id"] for row in measured],
+            "replay_sequence": replay_sequence,
+            "warmup_requests": sum(item["role"] == "warmup" for item in replay_sequence),
+            "request_cost": len(replay_sequence),
+        },
+        None,
+    )
 
 
 def make_plan(
@@ -216,7 +272,7 @@ def make_plan(
     *,
     seed: int,
     samples_per_session: int = 2,
-    output_budget: int,
+    output_budget: int | None = None,
     request_budget: int = 64,
     cache_recipe_id: str,
     cache_state: str = "unknown",
@@ -224,14 +280,18 @@ def make_plan(
     holdout_fraction: float = 0.25,
     stratum_weights: dict[str, float] | None = None,
 ) -> JsonObject:
-    """Build a stable screen/holdout plan with session-level separation.
+    """Build a budget-bounded, session-stratified screen/holdout plan.
 
-    ``request_budget`` bounds the total measured capsules in both splits; the
-    recorded warmup count applies independently to each arm and is separate.
-    Selected capsules retain their capture order within each session.
+    Sessions, rather than every session's requests, are sampled under a per-arm
+    total replay budget. Each selected session replays its captured sequence
+    from sequence 1 through the last measured request; unmeasured requests in
+    that prefix are explicit warmups. ``output_budget`` is only an optional
+    cohort filter. Captured request bodies and per-request budgets are never
+    rewritten.
     """
     samples_per_session = _positive_int(samples_per_session, "samples_per_session")
-    output_budget = _positive_int(output_budget, "output_budget")
+    if output_budget is not None:
+        output_budget = _positive_int(output_budget, "output_budget cohort filter")
     request_budget = _positive_int(request_budget, "request_budget")
     warmup_requests = _nonnegative_int(warmup_requests, "warmup_requests")
     if isinstance(seed, bool) or not isinstance(seed, int):
@@ -249,19 +309,11 @@ def make_plan(
     if not math.isfinite(holdout_fraction) or not 0 < holdout_fraction < 1:
         raise CorpusError("holdout_fraction must be between zero and one")
 
-    rows = _descriptor_set(descriptors)
-    traffic_classes = {row["traffic_class"] for row in rows}
+    source_rows = _descriptor_set(descriptors)
+    traffic_classes = {row["traffic_class"] for row in source_rows}
     if len(traffic_classes) != 1:
         raise CorpusError("one corpus plan may contain only one traffic_class; plan real, generated, or derived traffic separately")
-    for row in rows:
-        if row["output_budget"] is None:
-            raise CorpusError(f"capsule {row['capsule_id']} has no captured output budget")
-        if row["output_budget"] != output_budget:
-            raise CorpusError(
-                f"capsule {row['capsule_id']} captured output budget differs from the plan; "
-                "requests are never rewritten"
-            )
-    strata = sorted({row["stratum"] for row in rows})
+    strata = sorted({row["stratum"] for row in source_rows})
     weights: dict[str, float] | None = None
     if stratum_weights is not None:
         if not isinstance(stratum_weights, dict) or not stratum_weights:
@@ -276,45 +328,8 @@ def make_plan(
             raise CorpusError("stratum_weights must provide exactly one positive weight for every observed stratum")
 
     by_session: dict[str, list[JsonObject]] = {}
-    for row in rows:
+    for row in source_rows:
         by_session.setdefault(row["session_id"], []).append(row)
-    by_stratum: dict[str, list[str]] = {}
-    for session, session_rows in by_session.items():
-        by_stratum.setdefault(session_rows[0]["stratum"], []).append(session)
-
-    screen_sessions: list[str] = []
-    holdout_sessions: list[str] = []
-    for stratum in sorted(by_stratum):
-        sessions = sorted(by_stratum[stratum], key=lambda value: _rank(seed, f"session:{stratum}", value))
-        if len(sessions) <= 1:
-            screen_sessions.extend(sessions)
-            continue
-        count_holdout = max(1, math.ceil(len(sessions) * holdout_fraction))
-        count_holdout = min(count_holdout, len(sessions) - 1)
-        holdout_sessions.extend(sessions[:count_holdout])
-        screen_sessions.extend(sessions[count_holdout:])
-
-    screen_sessions.sort(key=lambda value: _rank(seed, "screen-order", value))
-    holdout_sessions.sort(key=lambda value: _rank(seed, "holdout-order", value))
-    split_sessions = {"screen": screen_sessions, "holdout": holdout_sessions}
-    if set(screen_sessions) & set(holdout_sessions):
-        raise AssertionError("session split overlap")
-
-    selected_by_split: dict[str, list[JsonObject]] = {"screen": [], "holdout": []}
-    for split_name, sessions in split_sessions.items():
-        for session in sessions:
-            selected = _select_session_rows(by_session[session], seed, samples_per_session)
-            for row in selected:
-                planned = dict(row)
-                planned["output_budget"] = output_budget
-                selected_by_split[split_name].append(planned)
-    selected_count = sum(len(values) for values in selected_by_split.values())
-    if selected_count > request_budget:
-        raise CorpusError(
-            f"selected {selected_count} requests exceeds request_budget {request_budget}; "
-            "reduce samples_per_session or increase the explicit budget"
-        )
-
     corpus_identity = [
         {
             key: row[key]
@@ -336,13 +351,194 @@ def make_plan(
                 "output_budget",
             )
         }
-        for row in sorted(rows, key=lambda item: item["capsule_id"])
+        for row in sorted(source_rows, key=lambda item: item["capsule_id"])
     ]
     corpus_id = canonical_hash({"schema_version": SCHEMA_VERSION, "descriptors": corpus_identity})
+
+    candidates_by_stratum: dict[str, list[JsonObject]] = {stratum: [] for stratum in strata}
+    ineligible_by_stratum: dict[str, dict[str, int]] = {stratum: {} for stratum in strata}
+    matching_sessions_by_stratum: dict[str, set[str]] = {stratum: set() for stratum in strata}
+    for session_rows in by_session.values():
+        stratum = session_rows[0]["stratum"]
+        if output_budget is None or any(row["output_budget"] == output_budget for row in session_rows):
+            matching_sessions_by_stratum[stratum].add(session_rows[0]["session_id"])
+        bundle, failure = _session_bundle(
+            session_rows,
+            samples_per_session=samples_per_session,
+            warmup_requests=warmup_requests,
+            output_budget_filter=output_budget,
+        )
+        if bundle is None:
+            assert failure is not None
+            failures = ineligible_by_stratum[stratum]
+            failures[failure] = failures.get(failure, 0) + 1
+        else:
+            candidates_by_stratum[stratum].append(bundle)
+
+    stratum_order = sorted(strata, key=lambda stratum: _rank(seed, "stratum-order", stratum))
+    ranked_sessions = {
+        stratum: sorted(
+            candidates_by_stratum[stratum],
+            key=lambda bundle: _rank(seed, f"session:{stratum}", bundle["session_id"]),
+        )
+        for stratum in strata
+    }
+    selected_by_stratum: dict[str, list[JsonObject]] = {stratum: [] for stratum in strata}
+    selected_session_ids: set[str] = set()
+    remaining_budget = request_budget
+
+    def select_next(stratum: str) -> bool:
+        nonlocal remaining_budget
+        for bundle in ranked_sessions[stratum]:
+            if bundle["session_id"] in selected_session_ids:
+                continue
+            if bundle["request_cost"] > remaining_budget:
+                continue
+            selected_session_ids.add(bundle["session_id"])
+            selected_by_stratum[stratum].append(bundle)
+            remaining_budget -= bundle["request_cost"]
+            return True
+        return False
+
+    # First try to reserve one independent session for each holdout and screen
+    # group where the source stratum has enough eligible sessions.
+    minimum_sessions = {
+        stratum: min(2, len(ranked_sessions[stratum])) for stratum in strata
+    }
+    while True:
+        advanced = False
+        for stratum in stratum_order:
+            if len(selected_by_stratum[stratum]) < minimum_sessions[stratum]:
+                advanced |= select_next(stratum)
+        if not advanced:
+            break
+
+    # Spend remaining budget in deterministic stratified rounds. This samples
+    # a subset of sessions for large corpora instead of failing after selecting
+    # requests from every session.
+    while True:
+        advanced = False
+        for stratum in stratum_order:
+            advanced |= select_next(stratum)
+        if not advanced:
+            break
+
+    split_bundles: dict[str, list[JsonObject]] = {"screen": [], "holdout": []}
+    selected_by_split: dict[str, list[JsonObject]] = {"screen": [], "holdout": []}
+    session_replay: dict[str, list[JsonObject]] = {"screen": [], "holdout": []}
+    screen_sessions: list[str] = []
+    holdout_sessions: list[str] = []
+    for stratum in strata:
+        bundles = selected_by_stratum[stratum]
+        ranked_selected = sorted(
+            bundles,
+            key=lambda bundle: _rank(seed, f"holdout:{stratum}", bundle["session_id"]),
+        )
+        holdout_count = 0
+        if len(ranked_selected) >= 2:
+            holdout_count = min(
+                len(ranked_selected) - 1,
+                max(1, math.ceil(len(ranked_selected) * holdout_fraction)),
+            )
+        holdout_ids = {bundle["session_id"] for bundle in ranked_selected[:holdout_count]}
+        for bundle in bundles:
+            split_name = "holdout" if bundle["session_id"] in holdout_ids else "screen"
+            split_bundles[split_name].append(bundle)
+            session_replay[split_name].append(
+                {
+                    "session_id": bundle["session_id"],
+                    "stratum": bundle["stratum"],
+                    "warmup_requests": bundle["warmup_requests"],
+                    "measured_capsule_ids": bundle["measured_capsule_ids"],
+                    "replay_sequence": bundle["replay_sequence"],
+                }
+            )
+            (holdout_sessions if split_name == "holdout" else screen_sessions).append(bundle["session_id"])
+            for row in bundle["measured"]:
+                planned = dict(row)
+                planned["session_warmup_requests"] = bundle["warmup_requests"]
+                selected_by_split[split_name].append(planned)
+
+    for split_name in ("screen", "holdout"):
+        split_bundles[split_name].sort(
+            key=lambda bundle: _rank(seed, f"{split_name}-order", bundle["session_id"])
+        )
+        session_replay[split_name].sort(
+            key=lambda session: _rank(seed, f"{split_name}-order", session["session_id"])
+        )
+        selected_by_split[split_name].sort(
+            key=lambda row: (
+                _rank(seed, f"{split_name}-order", row["session_id"]),
+                row["sequence"],
+            )
+        )
+    screen_sessions.sort(key=lambda value: _rank(seed, "screen-order", value))
+    holdout_sessions.sort(key=lambda value: _rank(seed, "holdout-order", value))
+    if set(screen_sessions) & set(holdout_sessions):
+        raise AssertionError("session split overlap")
+
+    coverage_strata: list[JsonObject] = []
+    for stratum in strata:
+        source_sessions = [
+            session for session, session_rows in by_session.items()
+            if session_rows[0]["stratum"] == stratum
+        ]
+        selected_bundles = selected_by_stratum[stratum]
+        selected_sessions = {bundle["session_id"] for bundle in selected_bundles}
+        screen_count = sum(bundle["session_id"] in set(screen_sessions) for bundle in selected_bundles)
+        holdout_count = sum(bundle["session_id"] in set(holdout_sessions) for bundle in selected_bundles)
+        eligible_count = len(ranked_sessions[stratum])
+        if eligible_count == 0:
+            reason_counts = ineligible_by_stratum[stratum]
+            status = (
+                "no_matching_output_budget"
+                if output_budget is not None and not matching_sessions_by_stratum[stratum]
+                else "no_replayable_contiguous_prefix"
+            )
+        elif len(source_sessions) < 2:
+            status = "single_source_session_no_holdout"
+        elif len(selected_sessions) < 2 or not screen_count or not holdout_count:
+            status = "budget_limited_session_coverage"
+        else:
+            status = "covered"
+        coverage_strata.append(
+            {
+                "stratum": stratum,
+                "source_sessions": len(source_sessions),
+                "cohort_sessions": len(matching_sessions_by_stratum[stratum]),
+                "eligible_sessions": eligible_count,
+                "selected_sessions": len(selected_sessions),
+                "screen_sessions": screen_count,
+                "holdout_sessions": holdout_count,
+                "ineligible_reasons": ineligible_by_stratum[stratum],
+                "status": status,
+            }
+        )
+    coverage_complete = all(item["status"] == "covered" for item in coverage_strata)
+    coverage = {
+        "complete": coverage_complete,
+        "missing_strata": [item["stratum"] for item in coverage_strata if item["status"] != "covered"],
+        "strata": coverage_strata,
+    }
+
+    measured_count = sum(len(values) for values in selected_by_split.values())
+    total_replay_count = sum(
+        len(session["replay_sequence"])
+        for sessions in session_replay.values()
+        for session in sessions
+    )
+    warmup_count = total_replay_count - measured_count
+    # A harness must run every unmeasured request in each selected session's
+    # captured prefix, so the arm warmup budget is the worst session's count.
+    max_session_warmup = max(
+        (session["warmup_requests"] for sessions in session_replay.values() for session in sessions),
+        default=0,
+    )
     screen_pair_count = len(selected_by_split["screen"])
     holdout_pair_count = len(selected_by_split["holdout"])
     adequate = (
-        len(screen_sessions) >= MIN_SCREEN_SESSIONS
+        coverage_complete
+        and len(screen_sessions) >= MIN_SCREEN_SESSIONS
         and screen_pair_count >= MIN_SCREEN_PAIRS
         and len(holdout_sessions) >= MIN_HOLDOUT_SESSIONS
     )
@@ -359,13 +555,19 @@ def make_plan(
         "cache": {
             "cache_recipe_id": _text(cache_recipe_id, "cache_recipe_id", max_length=256),
             "cache_state": cache_state,
-            "warmup_requests_per_arm": warmup_requests,
+            "warmup_requests_per_arm": max_session_warmup,
+            "minimum_head_warmup_skipped": warmup_requests,
         },
         "budgets": {
+            # A null cohort filter means each captured request keeps its own
+            # recorded output budget. Bodies are never rewritten.
             "output_tokens_per_request": output_budget,
+            "per_request_budget_preserved": output_budget is None,
             "measured_requests_total": request_budget,
-            "selected_requests_total": selected_count,
-            "warmup_requests_per_arm": warmup_requests,
+            "selected_requests_total": measured_count,
+            "replay_requests_total": total_replay_count,
+            "warmup_requests_per_arm": max_session_warmup,
+            "total_warmup_requests": warmup_count,
         },
         "stratum_weights": weights,
         "sessions": {
@@ -384,6 +586,8 @@ def make_plan(
             "status": "planned" if adequate else "inconclusive_insufficient_corpus",
         },
         "splits": selected_by_split,
+        "session_replay": session_replay,
+        "coverage": coverage,
     }
     return {**core, "plan_id": canonical_hash(core)}
 
@@ -422,7 +626,11 @@ def _parser() -> argparse.ArgumentParser:
     plan = commands.add_parser("plan", help="make a deterministic session-stratified screen/holdout plan")
     plan.add_argument("--manifest", required=True, type=Path, help="sanitized capture descriptor JSONL")
     plan.add_argument("--seed", required=True, type=int)
-    plan.add_argument("--output-budget", required=True, type=int, help="fixed per-request output-token budget")
+    plan.add_argument(
+        "--output-budget",
+        type=int,
+        help="optional cohort filter for one captured output-token budget; omitted keeps each request's own budget",
+    )
     plan.add_argument("--request-budget", type=int, default=64, help="maximum measured capsules across both splits")
     plan.add_argument("--samples-per-session", type=int, default=2)
     plan.add_argument("--cache-recipe-id", required=True)

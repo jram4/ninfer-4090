@@ -38,11 +38,10 @@ def _plan(session_count: int = 20, *, weighted: bool = False) -> dict:
         descriptors,
         seed=41,
         samples_per_session=2,
-        output_budget=8,
         request_budget=64,
         cache_recipe_id="fixed-cache-v1",
         cache_state="warm",
-        warmup_requests=2,
+        warmup_requests=0,
         stratum_weights={"common": 0.8, "rare": 0.2} if weighted else None,
     )
 
@@ -59,7 +58,7 @@ def _result(plan: dict, selected: dict, *, arm: str, wall: float = 1.0, tokens: 
         "session_id": selected["session_id"],
         "request_sha256": selected["request_sha256"],
         "identity_scope": selected["identity_scope"],
-        "output_budget": 8,
+        "output_budget": selected["output_budget"],
         "cache_recipe_id": plan["cache"]["cache_recipe_id"],
         "cache_state": plan["cache"]["cache_state"],
         "warmup_requests": plan["cache"]["warmup_requests_per_arm"],
@@ -176,23 +175,19 @@ class QuickEvalTests(unittest.TestCase):
 
     def test_body_redaction_is_an_identity_change_and_cannot_claim_a_win(self) -> None:
         descriptors = [_descriptor(session, request) for session in range(20) for request in range(2)]
-        for descriptor in descriptors:
-            descriptor["request_sha256"] = None
-            descriptor["identity_scope"] = "redacted_no_body_identity"
         plan = make_plan(
             descriptors,
             seed=43,
             samples_per_session=2,
-            output_budget=8,
             request_budget=64,
             cache_recipe_id="fixed-cache-v1",
         )
         baseline, candidate = _arms(plan, candidate_wall=0.01)
-        report = reduce_pair(plan, baseline, candidate, bootstrap_resamples=100)
-        self.assertEqual(report["classification"], "inconclusive")
-        self.assertTrue(
-            all("redacted_request_identity" in row["ineligibility_reasons"] for row in report["paired"]["capsules"])
-        )
+        # A redacted capture cannot be replayed, so a result that claims a
+        # different identity scope is rejected instead of being paired.
+        candidate[0]["identity_scope"] = "redacted_no_body_identity"
+        with self.assertRaisesRegex(QuickEvalError, "identity_scope differs"):
+            reduce_pair(plan, baseline, candidate, bootstrap_resamples=100)
 
     def test_output_does_not_echo_untrusted_prompt_or_completion_fields(self) -> None:
         plan = _plan()

@@ -6,8 +6,10 @@ module never opens the submission queue database and imports do no I/O.
 
 Epoch IDs are supplied by the caller. Pausing/resuming preserves every bound
 and reservation; cancelling is terminal and fences all later work dispatch.
-Events are append-only and idempotent by caller-supplied key. Callback packets
-are durable, manually drained records, not host wake-ups or LLM polling.
+Events are append-only and idempotent by caller-supplied key. Manual callback
+packets are drained explicitly; opt-in OpenCode-session callbacks enter a
+durable worker-owned outbox and are acknowledged only after prompt admission.
+There is no native host hook or parent-session LLM polling.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import sys
 from typing import Any, Iterator
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_EVENT_BYTES = 32 * 1024
 MAX_COST_MICROUSD = 1_000_000_000_000  # one million USD; protects decimal conversion and bounds policy input
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
@@ -144,7 +146,7 @@ class EpochStore:
         with self.connection() as con:
             con.execute("PRAGMA journal_mode = WAL")
             version = con.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, SCHEMA_VERSION):
+            if version not in (0, 1, SCHEMA_VERSION):
                 raise EpochError(f"unsupported epoch database schema version {version}")
             con.executescript(
                 """
@@ -226,6 +228,23 @@ class EpochStore:
                     recipient TEXT NOT NULL,
                     acked_at TEXT NOT NULL,
                     PRIMARY KEY(event_id, recipient)
+                );
+                CREATE TABLE IF NOT EXISTS callback_outbox (
+                    event_id INTEGER PRIMARY KEY REFERENCES events(event_id),
+                    epoch_id TEXT NOT NULL REFERENCES epochs(epoch_id),
+                    worker_id TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    message_id TEXT NOT NULL UNIQUE,
+                    packet_text TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('pending','dispatching','admitted','blocked')),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    lease_token TEXT,
+                    lease_until TEXT,
+                    delivery_fence INTEGER,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    admitted_at TEXT
                 );
                 """
             )
@@ -344,6 +363,12 @@ class EpochStore:
                     "UPDATE assignments SET status='cancelled',updated_at=? WHERE epoch_id=? AND status='launching'",
                     (now, epoch_id),
                 )
+                con.execute(
+                    """UPDATE callback_outbox SET status='pending',lease_token=NULL,lease_until=NULL,
+                       delivery_fence=NULL,last_error='epoch cancelled',updated_at=?
+                       WHERE epoch_id=? AND status='dispatching'""",
+                    (now, epoch_id),
+                )
                 self._append_event_tx(con, epoch_id, "epoch.cancelled", f"state:cancelled:{row['dispatch_fence'] + 1}",
                                       None, None, {"status": new_state, "reason": reason})
             else:
@@ -359,6 +384,13 @@ class EpochStore:
                 fence = row["dispatch_fence"] + 1
                 self._append_event_tx(con, epoch_id, f"epoch.{new_state}", f"state:{new_state}:{fence}",
                                       None, None, {"status": new_state, "dispatch_fence": fence})
+                if action == "pause":
+                    con.execute(
+                        """UPDATE callback_outbox SET status='pending',lease_token=NULL,lease_until=NULL,
+                           delivery_fence=NULL,last_error='epoch paused',updated_at=?
+                           WHERE epoch_id=? AND status='dispatching'""",
+                        (now, epoch_id),
+                    )
             return self._epoch_json(con, epoch_id)
 
     def add_hypothesis(self, epoch_id: str, hypothesis_id: str, description: str) -> dict[str, Any]:
@@ -450,8 +482,9 @@ class EpochStore:
             rows = con.execute(
                 """SELECT e.* FROM events e LEFT JOIN callback_acks a
                    ON a.event_id=e.event_id AND a.recipient=e.recipient
+                   LEFT JOIN callback_outbox o ON o.event_id=e.event_id
                    WHERE e.epoch_id=? AND e.recipient=? AND e.event_type='worker.callback'
-                     AND a.event_id IS NULL ORDER BY e.event_id LIMIT ?""",
+                     AND a.event_id IS NULL AND o.event_id IS NULL ORDER BY e.event_id LIMIT ?""",
                 (epoch_id, recipient, limit),
             )
             packets = []
@@ -469,6 +502,8 @@ class EpochStore:
                                 (event_id, epoch_id)).fetchone()
             if event is None or event["recipient"] != recipient:
                 raise EpochError("unknown callback packet for this recipient")
+            if con.execute("SELECT 1 FROM callback_outbox WHERE event_id=?", (event_id,)).fetchone():
+                raise EpochError("OpenCode callbacks are acknowledged only after API admission")
             cur = con.execute("INSERT OR IGNORE INTO callback_acks(event_id,recipient,acked_at) VALUES(?,?,?)",
                               (event_id, recipient, utc_now()))
             return cur.rowcount == 1

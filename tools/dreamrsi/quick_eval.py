@@ -98,10 +98,21 @@ def _validate_plan(plan: JsonObject, split: str) -> list[JsonObject]:
     budgets = _object(plan.get("budgets"), "plan budgets")
     cache = _object(plan.get("cache"), "plan cache")
     assert budgets is not None and cache is not None
-    output_budget = _count(budgets.get("output_tokens_per_request"), "plan output budget")
+    output_budget = _count(budgets.get("output_tokens_per_request"), "plan output budget", optional=True)
     request_budget = _count(budgets.get("measured_requests_total"), "plan request budget")
-    if output_budget is None or output_budget <= 0 or request_budget is None or request_budget <= 0:
-        raise QuickEvalError("plan budgets must be positive")
+    preserved = budgets.get("per_request_budget_preserved")
+    if preserved is None:
+        preserved = output_budget is None
+    if type(preserved) is not bool:
+        raise QuickEvalError("plan per_request_budget_preserved must be boolean")
+    if preserved:
+        # Each captured request keeps the output budget it was recorded with.
+        if output_budget is not None:
+            raise QuickEvalError("plan cannot both preserve per-request budgets and fix one output budget")
+    elif output_budget is None or output_budget <= 0:
+        raise QuickEvalError("plan output budget must be positive")
+    if request_budget is None or request_budget <= 0:
+        raise QuickEvalError("plan request budget must be positive")
     _text(cache.get("cache_recipe_id"), "plan cache_recipe_id")
     if not isinstance(cache.get("cache_state"), str) or cache.get("cache_state") not in {"unknown", "cold", "warm"}:
         raise QuickEvalError("plan cache_state is invalid")
@@ -144,7 +155,10 @@ def _validate_plan(plan: JsonObject, split: str) -> list[JsonObject]:
                 raise QuickEvalError(f"plan repeats capsule_id {capsule_id} across splits")
             if session_id not in group_sessions_set:
                 raise QuickEvalError(f"capsule {capsule_id} is outside its {split_name} session group")
-            if _count(item.get("output_budget"), f"{capsule_id} output_budget") != output_budget:
+            capsule_budget = _count(item.get("output_budget"), f"{capsule_id} output_budget")
+            if capsule_budget is None or capsule_budget <= 0:
+                raise QuickEvalError(f"capsule {capsule_id} output budget is invalid")
+            if not preserved and capsule_budget != output_budget:
                 raise QuickEvalError(f"capsule {capsule_id} output budget differs from plan")
             traffic_class = item.get("traffic_class")
             if not isinstance(traffic_class, str) or traffic_class not in {
@@ -184,7 +198,10 @@ def _validate_plan(plan: JsonObject, split: str) -> list[JsonObject]:
             raise QuickEvalError(f"plan repeats capsule_id {capsule_id}")
         if session_id not in allowed_sessions:
             raise QuickEvalError(f"capsule {capsule_id} is outside the plan's {split} session group")
-        if item.get("output_budget") != output_budget:
+        capsule_budget = _count(item.get("output_budget"), f"{capsule_id} output_budget")
+        if capsule_budget is None or capsule_budget <= 0:
+            raise QuickEvalError(f"capsule {capsule_id} output budget is invalid")
+        if not preserved and capsule_budget != output_budget:
             raise QuickEvalError(f"capsule {capsule_id} output budget differs from plan")
         scope = item.get("identity_scope")
         if not isinstance(scope, str) or scope not in IDENTITY_SCOPES:
@@ -283,6 +300,23 @@ def _safe_output_work(value: Any, name: str) -> JsonObject:
     return cleaned
 
 
+def _session_warmup(plan: JsonObject, session_id: str) -> int | None:
+    """Return the planned warmup count for one session, if the plan declares it."""
+    replay = plan.get("session_replay")
+    if not isinstance(replay, dict):
+        return None
+    for split in ("screen", "holdout"):
+        sessions = replay.get(split)
+        if not isinstance(sessions, list):
+            continue
+        for session in sessions:
+            if not isinstance(session, dict) or session.get("session_id") != session_id:
+                continue
+            count = _count(session.get("warmup_requests"), "session warmup count", optional=True)
+            return count
+    return None
+
+
 def _sanitize_result(row: JsonObject, arm: str, selected: JsonObject, plan: JsonObject, split: str) -> JsonObject:
     capsule_id = selected["capsule_id"]
     if not isinstance(row, dict) or row.get("schema_version") != SCHEMA_VERSION:
@@ -301,13 +335,21 @@ def _sanitize_result(row: JsonObject, arm: str, selected: JsonObject, plan: Json
         raise QuickEvalError(f"{arm} {capsule_id}: request identity differs from the plan")
     budgets = plan["budgets"]
     cache = plan["cache"]
-    if row.get("output_budget") != budgets["output_tokens_per_request"]:
+    preserved = bool(budgets.get("per_request_budget_preserved"))
+    if preserved:
+        if row.get("output_budget") != selected.get("output_budget"):
+            raise QuickEvalError(f"{arm} {capsule_id}: output budget differs from the captured request")
+    elif row.get("output_budget") != budgets["output_tokens_per_request"]:
         raise QuickEvalError(f"{arm} {capsule_id}: output budget differs from the plan")
     if row.get("cache_recipe_id") != cache["cache_recipe_id"]:
         raise QuickEvalError(f"{arm} {capsule_id}: cache recipe differs from the plan")
     if row.get("cache_state") != cache["cache_state"]:
         raise QuickEvalError(f"{arm} {capsule_id}: cache state differs from the plan")
-    if row.get("warmup_requests") != cache["warmup_requests_per_arm"]:
+    expected_warmup = _session_warmup(plan, selected["session_id"])
+    if expected_warmup is not None:
+        if row.get("warmup_requests") != expected_warmup:
+            raise QuickEvalError(f"{arm} {capsule_id}: warmup count differs from the session replay plan")
+    elif row.get("warmup_requests") != cache["warmup_requests_per_arm"]:
         raise QuickEvalError(f"{arm} {capsule_id}: warmup count differs from the plan")
 
     complete = row.get("complete")

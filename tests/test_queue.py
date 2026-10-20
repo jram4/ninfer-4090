@@ -150,6 +150,34 @@ def test_cancellation_wins_over_late_success(tmp_path: Path) -> None:
     assert result["receipt"] is None
 
 
+def test_release_requeues_fifo_and_fences_the_released_claim(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "candidate")
+    queue = Queue(tmp_path / "queue.sqlite")
+    submission = _submission(repo, tmp_path / "packages")
+    queue.enqueue(submission)
+    claim = queue.claim("fnn-gpu0", lease_seconds=60)
+    assert claim is not None
+    released = queue.release(submission["submission_id"], claim["claim_token"])
+    assert released["status"] == "queued"
+    with pytest.raises(StaleClaimError):
+        queue.finish(submission["submission_id"], claim["claim_token"], _receipt(submission))
+    retry = queue.claim("fnn-gpu0", lease_seconds=60)
+    assert retry is not None
+    assert retry["submission_id"] == submission["submission_id"]
+
+
+def test_release_after_cancellation_marks_cancelled(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "candidate")
+    queue = Queue(tmp_path / "queue.sqlite")
+    submission = _submission(repo, tmp_path / "packages")
+    queue.enqueue(submission)
+    claim = queue.claim("fnn-gpu0", lease_seconds=60)
+    assert claim is not None
+    queue.cancel(submission["submission_id"], "epoch cancelled")
+    result = queue.release(submission["submission_id"], claim["claim_token"])
+    assert result["status"] == "cancelled"
+
+
 def test_backpressure_is_bounded(tmp_path: Path) -> None:
     first_repo = _repo(tmp_path / "candidate-1")
     second_repo = _repo(tmp_path / "candidate-2")
