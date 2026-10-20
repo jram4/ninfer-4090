@@ -94,8 +94,7 @@ void speculative_accept_greedy_drafts_launch(const Tensor& target_tokens, const 
             static_cast<std::int32_t*>(lengths.data), static_cast<std::int32_t*>(anchors.data),
             static_cast<std::int32_t*>(licensed_tokens.data),
             static_cast<std::int32_t*>(licensed_counts.data),
-            static_cast<std::int32_t*>(accepted.data), configs, token_domain, cols, partial_blocks,
-            groups, scratch, layout.bytes);
+            static_cast<std::int32_t*>(accepted.data), configs, token_domain, cols, 0, partial_blocks, groups, scratch, layout.bytes);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -145,7 +144,7 @@ void speculative_accept_sparse_drafts_launch(
         static_cast<std::int32_t*>(licensed_tokens.data),
         static_cast<std::int32_t*>(licensed_counts.data),
         static_cast<std::int32_t*>(accepted_drafts.data), configs, token_domain, cols,
-        partial_blocks, groups, scratch, layout.bytes);
+        candidate_ids.ne[0], partial_blocks, groups, scratch, layout.bytes);
 
     CUDA_CHECK(cudaGetLastError());
 }

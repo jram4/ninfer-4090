@@ -50,6 +50,40 @@ void sample_batch_launch(const Tensor& logits, Tensor& out, std::int32_t token_d
     CUDA_CHECK(cudaGetLastError());
 }
 
+void sample_mtp_proposal_launch(const Tensor& logits, Tensor& out_tokens,
+                                Tensor& candidate_ids, Tensor& proposal_q,
+                                std::int32_t public_token_domain, const std::int32_t* id_map,
+                                const SamplingConfig* configs, const Tensor& logical_positions,
+                                const Tensor& round_tokens, const Tensor& round_counts,
+                                const Tensor& prior_proposals, std::int32_t prior_count,
+                                std::int32_t prior_stride, std::int32_t proposal_step, std::int32_t position_step,
+                                cudaStream_t stream) {
+    const int batch = logits.ne[1];
+    const int proposal_rows = id_map == nullptr ? public_token_domain : logits.ne[0];
+    if (proposal_rows <= kSamplerTileItems) {
+        sample_mtp_proposal_small_row_kernel<<<static_cast<unsigned int>(batch), kSamplerBlock, 0,
+                                               stream>>>(
+            static_cast<const __nv_bfloat16*>(logits.data), static_cast<int*>(out_tokens.data),
+            static_cast<int*>(candidate_ids.data), static_cast<float*>(proposal_q.data), configs,
+            static_cast<const int*>(logical_positions.data),
+            static_cast<const int*>(round_tokens.data), static_cast<const int*>(round_counts.data),
+            static_cast<const int*>(prior_proposals.data), id_map, public_token_domain,
+            proposal_rows, logits.ne[0], round_tokens.ne[0], candidate_ids.ne[1], prior_stride,
+            prior_count, proposal_step, position_step);
+    } else {
+        sample_mtp_proposal_row_kernel<<<static_cast<unsigned int>(batch), kSamplerBlock, 0,
+                                         stream>>>(
+            static_cast<const __nv_bfloat16*>(logits.data), static_cast<int*>(out_tokens.data),
+            static_cast<int*>(candidate_ids.data), static_cast<float*>(proposal_q.data), configs,
+            static_cast<const int*>(logical_positions.data),
+            static_cast<const int*>(round_tokens.data), static_cast<const int*>(round_counts.data),
+            static_cast<const int*>(prior_proposals.data), id_map, public_token_domain,
+            proposal_rows, logits.ne[0], batch, round_tokens.ne[0], candidate_ids.ne[1],
+            prior_stride, prior_count, proposal_step, position_step);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void increment_token_counts_launch(const Tensor& token_ids, Tensor& token_counts,
                                    cudaStream_t stream) {
     constexpr int kBlock = 256;

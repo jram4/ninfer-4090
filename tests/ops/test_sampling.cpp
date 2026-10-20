@@ -591,6 +591,242 @@ int workspace_route_boundary_contract() {
     return failures;
 }
 
+int mtp_sparse_proposal_contract() {
+    constexpr int rows = 32;
+    constexpr int token_domain = 64;
+    constexpr int batch = 2;
+    constexpr int window = 3;
+    constexpr int step = 1;
+    constexpr int round_width = 4;
+    std::vector<int> id_map(rows);
+    for (int row = 0; row < rows; ++row) id_map[static_cast<std::size_t>(row)] = (row * 7) % token_domain;
+
+    std::vector<float> logits(static_cast<std::size_t>(rows) * batch);
+    for (int b = 0; b < batch; ++b) {
+        for (int row = 0; row < rows; ++row) {
+            float value = static_cast<float>((row * 19 + b * 11) % 37) / 9.0F - 2.0F;
+            if (row % 6 == 0) value = 0.5F; // exercise ties after public-id remapping
+            logits[static_cast<std::size_t>(row) + static_cast<std::size_t>(rows) * b] = value;
+        }
+    }
+    round_to_bf16(logits);
+
+    const std::vector<int> logical_positions{101, 203};
+    const std::vector<int> round_counts{3, 2};
+    std::vector<int> round_tokens(static_cast<std::size_t>(round_width) * batch, 0);
+    round_tokens[0] = id_map[3];
+    round_tokens[1] = id_map[3];
+    round_tokens[2] = id_map[17];
+    round_tokens[round_width] = id_map[6];
+    round_tokens[round_width + 1] = id_map[21];
+    // Tensor [B,K], with row as the fast dimension.
+    std::vector<int> prior(static_cast<std::size_t>(batch) * window, 0);
+    prior[0] = id_map[3];
+    prior[1] = id_map[6];
+
+    std::vector<std::vector<int>> committed_counts(batch,
+                                                    std::vector<int>(token_domain, 0));
+    committed_counts[0][static_cast<std::size_t>(id_map[3])] = 2;
+    committed_counts[1][static_cast<std::size_t>(id_map[6])] = 1;
+    std::vector<ops::SamplingConfig> configs(batch);
+    configs[0].temperature = 0.85F;
+    configs[0].top_k = 20;
+    configs[0].top_p = 0.79F;
+    configs[0].min_p = 0.035F;
+    configs[0].presence_penalty = 0.31F;
+    configs[0].frequency_penalty = 0.08F;
+    configs[0].seed = 1234567;
+    configs[1].temperature = 1.15F;
+    configs[1].top_k = 7;
+    configs[1].top_p = 0.92F;
+    configs[1].min_p = 0.11F;
+    configs[1].presence_penalty = 0.17F;
+    configs[1].frequency_penalty = 0.045F;
+    configs[1].seed = 891011;
+
+    std::vector<std::vector<float>> dense_logits(batch,
+                                                 std::vector<float>(token_domain, -100.0F));
+    for (int b = 0; b < batch; ++b) {
+        for (int row = 0; row < rows; ++row) {
+            const int id = id_map[static_cast<std::size_t>(row)];
+            dense_logits[static_cast<std::size_t>(b)][static_cast<std::size_t>(id)] =
+                logits[static_cast<std::size_t>(row) + static_cast<std::size_t>(rows) * b];
+        }
+        auto& counts = committed_counts[static_cast<std::size_t>(b)];
+        for (int j = 0; j < round_counts[static_cast<std::size_t>(b)]; ++j) {
+            ++counts[static_cast<std::size_t>(round_tokens[static_cast<std::size_t>(b) * round_width + j])];
+        }
+        ++counts[static_cast<std::size_t>(prior[static_cast<std::size_t>(b)])];
+    }
+
+    DeviceBuffer d_logits = to_device_bf16(logits);
+    DeviceBuffer d_positions = to_device(logical_positions);
+    DeviceBuffer d_round_tokens = to_device(round_tokens);
+    DeviceBuffer d_round_counts = to_device(round_counts);
+    DeviceBuffer d_prior = to_device(prior);
+    DeviceBuffer d_id_map = to_device(id_map);
+    std::vector<std::unique_ptr<GuardedDeviceBuffer>> d_counts;
+    d_counts.reserve(batch);
+    for (int b = 0; b < batch; ++b) {
+        std::vector<int> initial(token_domain, 0);
+        if (b == 0) initial[static_cast<std::size_t>(id_map[3])] = 2;
+        else initial[static_cast<std::size_t>(id_map[6])] = 1;
+        d_counts.push_back(std::make_unique<GuardedDeviceBuffer>(initial.size() * sizeof(int)));
+        d_counts.back()->copy_from_host(initial.data(), initial.size() * sizeof(int));
+        configs[static_cast<std::size_t>(b)].token_counts =
+            static_cast<std::int32_t*>(d_counts.back()->data());
+    }
+    const auto configs_before = configs;
+    DeviceBuffer d_configs = to_device(configs);
+
+    const std::size_t candidate_elements =
+        static_cast<std::size_t>(ops::kSamplingCandidateCapacity) * window * batch;
+    GuardedDeviceBuffer d_tokens(static_cast<std::size_t>(batch) * sizeof(int));
+    GuardedDeviceBuffer d_candidates(candidate_elements * sizeof(int));
+    GuardedDeviceBuffer d_q(candidate_elements * sizeof(float));
+    std::vector<int> token_sentinel(batch, -701), candidate_sentinel(candidate_elements, -702);
+    std::vector<float> q_sentinel(candidate_elements, -3.0F);
+    d_tokens.copy_from_host(token_sentinel.data(), token_sentinel.size() * sizeof(int));
+    d_candidates.copy_from_host(candidate_sentinel.data(), candidate_sentinel.size() * sizeof(int));
+    d_q.copy_from_host(q_sentinel.data(), q_sentinel.size() * sizeof(float));
+
+    Tensor logits_tensor(d_logits.p, DType::BF16, {rows, batch});
+    Tensor tokens_tensor(d_tokens.data(), DType::I32, {batch});
+    Tensor candidates_tensor(d_candidates.data(), DType::I32,
+                             {ops::kSamplingCandidateCapacity, window, batch});
+    Tensor q_tensor(d_q.data(), DType::FP32,
+                    {ops::kSamplingCandidateCapacity, window, batch});
+    Tensor positions_tensor(d_positions.p, DType::I32, {batch});
+    Tensor round_tensor(d_round_tokens.p, DType::I32, {round_width, batch});
+    Tensor counts_tensor(d_round_counts.p, DType::I32, {batch});
+    Tensor prior_tensor(d_prior.p, DType::I32, {batch, window});
+    const auto launch = [&] {
+        ops::sample_mtp_proposal(
+            logits_tensor, tokens_tensor, candidates_tensor, q_tensor, token_domain,
+            static_cast<const std::int32_t*>(d_id_map.p),
+            static_cast<const ops::SamplingConfig*>(d_configs.p), positions_tensor, round_tensor,
+            counts_tensor, prior_tensor, 1, step, 2, nullptr);
+    };
+    launch();
+    cuda_synchronize();
+
+    const auto actual_tokens = from_device<int>(d_tokens.data(), batch);
+    const auto actual_candidates = from_device<int>(d_candidates.data(), candidate_elements);
+    const auto actual_q = from_device<float>(d_q.data(), candidate_elements);
+    int failures = d_tokens.verify_guards("MTP proposal tokens") +
+                   d_candidates.verify_guards("MTP proposal candidate ids") +
+                   d_q.verify_guards("MTP proposal q");
+    for (int b = 0; b < batch; ++b) {
+        auto proposal_config = configs_before[static_cast<std::size_t>(b)];
+        if (proposal_config.top_k <= 0 ||
+            proposal_config.top_k > ops::kMtpProposalSupportCapacity) {
+            proposal_config.top_k = ops::kMtpProposalSupportCapacity;
+        }
+        const auto distribution = distribution_oracle(
+            dense_logits[static_cast<std::size_t>(b)], token_domain, proposal_config,
+            &committed_counts[static_cast<std::size_t>(b)]);
+        const std::size_t out_base =
+            (static_cast<std::size_t>(b) * window + step) * ops::kSamplingCandidateCapacity;
+        double q_sum = 0.0;
+        bool picked_in_support = false;
+        for (int j = 0; j < ops::kSamplingCandidateCapacity; ++j) {
+            const std::size_t at = out_base + static_cast<std::size_t>(j);
+            const float q = actual_q[at];
+            if (j < static_cast<int>(distribution.tokens.size())) {
+                if (actual_candidates[at] != distribution.tokens[static_cast<std::size_t>(j)] ||
+                    std::abs(static_cast<double>(q) -
+                             distribution.probabilities[static_cast<std::size_t>(j)]) > 5.0e-5) {
+                    std::cerr << "MTP proposal q differs from transformed oracle at row " << b
+                              << " rank " << j << '\n';
+                    ++failures;
+                }
+                q_sum += q;
+                if (actual_tokens[static_cast<std::size_t>(b)] == actual_candidates[at] && q > 0.0F)
+                    picked_in_support = true;
+            } else if (q != 0.0F || actual_candidates[at] != 0) {
+                std::cerr << "MTP proposal wrote a nonzero or invalid candidate outside q support\n";
+                ++failures;
+            }
+        }
+        if (std::abs(q_sum - 1.0) > 5.0e-5 || !picked_in_support) {
+            std::cerr << "MTP proposal q is not normalized or did not contain its sample\n";
+            ++failures;
+        }
+    }
+    for (int b = 0; b < batch; ++b) {
+        for (int j = 0; j < window; ++j) {
+            if (j == step) continue;
+            const std::size_t base =
+                (static_cast<std::size_t>(b) * window + j) * ops::kSamplingCandidateCapacity;
+            for (int c = 0; c < ops::kSamplingCandidateCapacity; ++c) {
+                if (actual_candidates[base + c] != candidate_sentinel[base + c] ||
+                    actual_q[base + c] != q_sentinel[base + c]) {
+                    std::cerr << "MTP proposal wrote outside the selected position\n";
+                    ++failures;
+                    j = window;
+                    break;
+                }
+            }
+        }
+    }
+
+    GuardedDeviceBuffer d_tokens_again(static_cast<std::size_t>(batch) * sizeof(int));
+    GuardedDeviceBuffer d_candidates_again(candidate_elements * sizeof(int));
+    GuardedDeviceBuffer d_q_again(candidate_elements * sizeof(float));
+    d_tokens_again.copy_from_host(token_sentinel.data(), token_sentinel.size() * sizeof(int));
+    d_candidates_again.copy_from_host(candidate_sentinel.data(), candidate_sentinel.size() * sizeof(int));
+    d_q_again.copy_from_host(q_sentinel.data(), q_sentinel.size() * sizeof(float));
+    Tensor tokens_again(d_tokens_again.data(), DType::I32, {batch});
+    Tensor candidates_again(d_candidates_again.data(), DType::I32,
+                           {ops::kSamplingCandidateCapacity, window, batch});
+    Tensor q_again(d_q_again.data(), DType::FP32,
+                   {ops::kSamplingCandidateCapacity, window, batch});
+    ops::sample_mtp_proposal(logits_tensor, tokens_again, candidates_again, q_again, token_domain,
+                             static_cast<const std::int32_t*>(d_id_map.p),
+                             static_cast<const ops::SamplingConfig*>(d_configs.p), positions_tensor,
+                             round_tensor, counts_tensor, prior_tensor, 1, step, 2, nullptr);
+    cuda_synchronize();
+    failures += verify_exact("MTP proposal seed repeat tokens",
+                             from_device<int>(d_tokens_again.data(), batch), actual_tokens);
+    failures += verify_exact("MTP proposal seed repeat candidate ids",
+                             from_device<int>(d_candidates_again.data(), candidate_elements),
+                             actual_candidates);
+    failures += verify_exact("MTP proposal seed repeat q",
+                             from_device<float>(d_q_again.data(), candidate_elements), actual_q);
+
+    for (int b = 0; b < batch; ++b) {
+        std::vector<int> initial(token_domain, 0);
+        if (b == 0) initial[static_cast<std::size_t>(id_map[3])] = 2;
+        else initial[static_cast<std::size_t>(id_map[6])] = 1;
+        failures += verify_exact("MTP proposal leaves committed counts unchanged",
+                                 from_device<int>(d_counts[static_cast<std::size_t>(b)]->data(),
+                                                  token_domain), initial);
+        failures += d_counts[static_cast<std::size_t>(b)]->verify_guards("MTP proposal counts");
+    }
+
+    try {
+        Tensor bad_candidates(d_candidates.data(), DType::I32, {16, window, batch});
+        Tensor bad_q(d_q.data(), DType::FP32, {16, window, batch});
+        ops::sample_mtp_proposal(logits_tensor, tokens_tensor, bad_candidates, bad_q, token_domain,
+                                 static_cast<const std::int32_t*>(d_id_map.p),
+                                 static_cast<const ops::SamplingConfig*>(d_configs.p),
+                                 positions_tensor, round_tensor, counts_tensor, prior_tensor, 1,
+                                 step, 2, nullptr);
+        std::cerr << "MTP proposal accepted unsupported candidate width\n";
+        ++failures;
+    } catch (const std::invalid_argument&) {}
+    try {
+        ops::sample_mtp_proposal(logits_tensor, tokens_tensor, candidates_tensor, q_tensor,
+                                 token_domain, static_cast<const std::int32_t*>(d_id_map.p),
+                                 static_cast<const ops::SamplingConfig*>(d_configs.p),
+                                 positions_tensor, round_tensor, counts_tensor, prior_tensor, 2,
+                                 step, 2, nullptr);
+        std::cerr << "MTP proposal accepted a prior count beyond its position\n";
+        ++failures;
+    } catch (const std::invalid_argument&) {}
+    return failures;
+}
+
 int increment_counts_contract() {
     const std::vector<std::int32_t> ids{1, 3, 1, 7};
     const std::vector<std::int32_t> initial{0, 2, 0, 4, 0, 0, 0, 1};
@@ -609,6 +845,115 @@ int increment_counts_contract() {
     failures += verify_exact("increment token counts read-only ids",
                              from_device<std::int32_t>(device_ids, ids.size()), ids);
     failures += device_counts.verify_guards("increment token counts guards");
+    return failures;
+}
+
+
+int mtp_large_row_proposal_merge_contract() {
+    constexpr int rows = 131072;
+    constexpr int token_domain = 248320;
+    constexpr int batch = 1;
+    constexpr int window = 1;
+
+    std::vector<int> id_map(rows);
+    std::vector<float> logits(rows);
+    for (int row = 0; row < rows; ++row) {
+        id_map[static_cast<std::size_t>(row)] =
+            token_domain - rows + ((row * 31 + 17) % rows);
+        const int level = (row * 29 + 7) % 31;
+        logits[static_cast<std::size_t>(row)] = static_cast<float>(level) * 0.25F - 2.0F;
+    }
+    round_to_bf16(logits);
+
+    std::vector<float> dense_logits(static_cast<std::size_t>(token_domain), -100.0F);
+    for (int row = 0; row < rows; ++row) {
+        dense_logits[static_cast<std::size_t>(id_map[static_cast<std::size_t>(row)])] =
+            logits[static_cast<std::size_t>(row)];
+    }
+
+    ops::SamplingConfig config;
+    config.temperature = 0.9F;
+    config.top_k = ops::kSamplingCandidateCapacity;
+    config.top_p = 1.0F;
+    config.seed = 314159;
+    auto proposal_config = config;
+    proposal_config.top_k = ops::kMtpProposalSupportCapacity;
+    const Distribution expected =
+        distribution_oracle(dense_logits, token_domain, proposal_config);
+    if (expected.tokens.size() != ops::kMtpProposalSupportCapacity) {
+        std::cerr << "large-row MTP oracle did not produce the full capped candidate set\n";
+        return 1;
+    }
+
+    const std::vector<int> positions{73};
+    const std::vector<int> round_tokens{0};
+    const std::vector<int> round_counts{0};
+    const std::vector<int> prior{0};
+    const std::vector<ops::SamplingConfig> configs{config};
+    DeviceBuffer d_logits = to_device_bf16(logits);
+    DeviceBuffer d_id_map = to_device(id_map);
+    DeviceBuffer d_positions = to_device(positions);
+    DeviceBuffer d_round_tokens = to_device(round_tokens);
+    DeviceBuffer d_round_counts = to_device(round_counts);
+    DeviceBuffer d_prior = to_device(prior);
+    DeviceBuffer d_configs = to_device(configs);
+
+    GuardedDeviceBuffer d_tokens(sizeof(int));
+    GuardedDeviceBuffer d_candidates(ops::kSamplingCandidateCapacity * sizeof(int));
+    GuardedDeviceBuffer d_q(ops::kSamplingCandidateCapacity * sizeof(float));
+    const int token_sentinel = -701;
+    std::vector<int> candidate_sentinel(ops::kSamplingCandidateCapacity, -702);
+    std::vector<float> q_sentinel(ops::kSamplingCandidateCapacity, -3.0F);
+    d_tokens.copy_from_host(&token_sentinel, sizeof(token_sentinel));
+    d_candidates.copy_from_host(candidate_sentinel.data(), d_candidates.bytes());
+    d_q.copy_from_host(q_sentinel.data(), d_q.bytes());
+
+    Tensor logits_tensor(d_logits.p, DType::BF16, {rows, batch});
+    Tensor tokens_tensor(d_tokens.data(), DType::I32, {batch});
+    Tensor candidates_tensor(d_candidates.data(), DType::I32,
+                             {ops::kSamplingCandidateCapacity, window, batch});
+    Tensor q_tensor(d_q.data(), DType::FP32,
+                    {ops::kSamplingCandidateCapacity, window, batch});
+    Tensor positions_tensor(d_positions.p, DType::I32, {batch});
+    Tensor round_tensor(d_round_tokens.p, DType::I32, {1, batch});
+    Tensor counts_tensor(d_round_counts.p, DType::I32, {batch});
+    Tensor prior_tensor(d_prior.p, DType::I32, {batch, window});
+    ops::sample_mtp_proposal(
+        logits_tensor, tokens_tensor, candidates_tensor, q_tensor, token_domain,
+        static_cast<const std::int32_t*>(d_id_map.p),
+        static_cast<const ops::SamplingConfig*>(d_configs.p), positions_tensor, round_tensor,
+        counts_tensor, prior_tensor, 0, 0, 0, nullptr);
+    cuda_synchronize();
+
+    const int actual_token = from_device<int>(d_tokens.data(), 1).front();
+    const auto actual_candidates =
+        from_device<int>(d_candidates.data(), ops::kSamplingCandidateCapacity);
+    const auto actual_q = from_device<float>(d_q.data(), ops::kSamplingCandidateCapacity);
+    int failures = d_tokens.verify_guards("large-row MTP proposal token") +
+                   d_candidates.verify_guards("large-row MTP proposal candidates") +
+                   d_q.verify_guards("large-row MTP proposal q");
+    double q_sum = 0.0;
+    bool picked_in_support = false;
+    for (int rank = 0; rank < ops::kSamplingCandidateCapacity; ++rank) {
+        const std::size_t at = static_cast<std::size_t>(rank);
+        if (rank < ops::kMtpProposalSupportCapacity) {
+            if (actual_candidates[at] != expected.tokens[at] ||
+                std::abs(static_cast<double>(actual_q[at]) - expected.probabilities[at]) > 5.0e-5) {
+                std::cerr << "large-row MTP proposal differs from independent BF16 top-12 oracle at rank "
+                          << rank << "\n";
+                ++failures;
+            }
+        } else if (actual_candidates[at] != 0 || actual_q[at] != 0.0F) {
+            std::cerr << "large-row MTP proposal wrote beyond q support\n";
+            ++failures;
+        }
+        q_sum += actual_q[at];
+        if (actual_token == actual_candidates[at] && actual_q[at] > 0.0F) picked_in_support = true;
+    }
+    if (std::abs(q_sum - 1.0) > 5.0e-5 || !picked_in_support) {
+        std::cerr << "large-row MTP proposal q is not normalized or omitted its sample\n";
+        ++failures;
+    }
     return failures;
 }
 
@@ -642,6 +987,8 @@ int main() {
     failures += rng_key_contract();
     failures += workspace_route_boundary_contract();
     failures += increment_counts_contract();
+    failures += mtp_sparse_proposal_contract();
+    failures += mtp_large_row_proposal_merge_contract();
 
     std::cout << (failures == 0 ? "OK" : "FAIL") << " sample public contract\n";
     return failures == 0 ? 0 : 1;

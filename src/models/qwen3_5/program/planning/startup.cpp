@@ -503,8 +503,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         mtp_full_call(mtp_align, 1, text_envelope, false);
         WorkspaceLayoutBuilder mtp_proposal;
         proposal_scratch(mtp_proposal, 1);
-        const std::size_t accept = ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
-            dimension(parameters.model.resources().public_token_count), drafts, drafts, 1, 1);
+        const std::size_t accept = ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
+            dimension(parameters.model.resources().public_token_count), {false}, drafts, drafts, 1,
+            1);
         out.mtp_round = std::max({accept, finish(mtp_batch), finish(mtp_ar), finish(mtp_proposal)});
         out.ordinary_round = std::max(out.ordinary_round, finish(mtp_align));
 
@@ -540,9 +541,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             WorkspaceLayoutBuilder proposal;
             proposal_scratch(proposal, batch);
             const std::size_t batch_accept =
-                ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
-                    dimension(parameters.model.resources().public_token_count), drafts, drafts,
-                    batch, batch);
+                ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
+                    dimension(parameters.model.resources().public_token_count), {false}, drafts,
+                    drafts, batch, batch);
             out.mtp_round = std::max({out.mtp_round, finish(target), finish(alignment), finish(ar),
                                       finish(proposal), batch_accept});
         }
