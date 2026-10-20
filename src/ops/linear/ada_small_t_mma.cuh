@@ -3,6 +3,7 @@
 #include "core/device.h"
 #include "ops/common/memory.cuh"
 #include "ops/common/mma.cuh"
+#include "ops/common/warp.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -110,13 +111,32 @@ __device__ __forceinline__ unsigned q4_ada_decode_pair(unsigned byte) {
     return *reinterpret_cast<const unsigned*>(&value);
 }
 
+__device__ __forceinline__ uint4 rmsnorm_bf16x8(uint4 input, const __nv_bfloat16* weight,
+                                                int first_index, float inverse,
+                                                bool unit_offset) {
+    uint4 output = input;
+    const auto* input_pairs = reinterpret_cast<const __nv_bfloat162*>(&input);
+    auto* output_pairs = reinterpret_cast<__nv_bfloat162*>(&output);
+    const auto* weight_pairs = reinterpret_cast<const __nv_bfloat162*>(weight + first_index);
+#pragma unroll
+    for (int pair = 0; pair < 4; ++pair) {
+        const float2 value = __bfloat1622float2(input_pairs[pair]);
+        const float2 gain = __bfloat1622float2(weight_pairs[pair]);
+        const float offset = unit_offset ? 1.0f : 0.0f;
+        output_pairs[pair] = __floats2bfloat162_rn(
+            value.x * inverse * (gain.x + offset), value.y * inverse * (gain.y + offset));
+    }
+    return output;
+}
+
 // Epilogue::kPairedHalves == false: epilogue(weight_row, token, dot) for every CTA row and live
 // token. true: epilogue(output_row, token, gate_dot, up_dot) for the CTA's AdaPairedHalfRows pairs.
-template <class S, int K, class RowMap, class Epilogue>
+template <class S, int K, class RowMap, class Epilogue, bool NormalizeInput = false>
 __launch_bounds__(S::kThreads) __global__ void ada_small_t_mma_kernel(
     const __nv_bfloat16* __restrict__ x, std::int32_t x_ld, const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ high, const std::uint8_t* __restrict__ scales,
-    std::int32_t tokens, Epilogue epilogue) {
+    std::int32_t tokens, const __nv_bfloat16* __restrict__ norm_weight, float norm_eps,
+    bool norm_unit_offset, Epilogue epilogue) {
     constexpr int kGroupK = 64;
     static_assert(K % (kGroupK * S::kG) == 0);
     constexpr int kGroups     = K / kGroupK;
@@ -132,6 +152,31 @@ __launch_bounds__(S::kThreads) __global__ void ada_small_t_mma_kernel(
     const int q        = lane & 3;
     const int group_id = lane >> 2;
     const int block    = static_cast<int>(blockIdx.x);
+
+    __shared__ float norm_warp_sums[NormalizeInput ? S::kWarps : 1];
+    __shared__ float norm_inverse[NormalizeInput ? 8 : 1];
+    if constexpr (NormalizeInput) {
+        static_assert(K == 5120 && S::kTokenTiles == 1,
+                      "fused RMSNorm input requires the 5120-row single-token-tile profile");
+        // Each output CTA derives the token scale, then rounds normalized fragments to BF16 as
+        // they enter the projection. This keeps the RMSNorm result tensor out of global memory.
+        const auto* input_pairs = reinterpret_cast<const __nv_bfloat162*>(x);
+        for (int token = 0; token < tokens; ++token) {
+            float local_sum = 0.0f;
+#pragma unroll
+            for (int index = 0; index < K / 2 / S::kThreads; ++index) {
+                const int pair = tid + index * S::kThreads;
+                const float2 value = __bfloat1622float2(
+                    __ldg(input_pairs + static_cast<std::int64_t>(token) * (x_ld / 2) + pair));
+                local_sum += value.x * value.x + value.y * value.y;
+            }
+            const float sum = block_reduce_sum<S::kThreads>(local_sum, norm_warp_sums);
+            if (tid == 0) {
+                norm_inverse[token] = rsqrtf(sum / static_cast<float>(K) + norm_eps);
+            }
+            __syncthreads();
+        }
+    }
 
     const auto issue = [&](int stage) {
         std::uint8_t* code_dst  = smem + (stage % S::kStages) * S::kStageBytes;
@@ -196,6 +241,15 @@ __launch_bounds__(S::kThreads) __global__ void ada_small_t_mma_kernel(
             dst[j].lo[1] = lo_valid ? __ldg(lo + 1) : zero;
             dst[j].hi[0] = hi_valid ? __ldg(hi) : zero;
             dst[j].hi[1] = hi_valid ? __ldg(hi + 1) : zero;
+            if constexpr (NormalizeInput) {
+                if (lo_valid) {
+                    const float inverse = norm_inverse[group_id];
+                    dst[j].lo[0] = rmsnorm_bf16x8(dst[j].lo[0], norm_weight, k0 + 16 * q,
+                                                 inverse, norm_unit_offset);
+                    dst[j].lo[1] = rmsnorm_bf16x8(dst[j].lo[1], norm_weight, k0 + 16 * q + 8,
+                                                 inverse, norm_unit_offset);
+                }
+            }
         }
     };
 
@@ -326,15 +380,37 @@ void ada_small_t_mma_launch(const __nv_bfloat16* x, std::int32_t x_ld, const std
                             const std::uint8_t* high, const std::uint8_t* scales, std::int32_t rows,
                             std::int32_t tokens, Epilogue epilogue, cudaStream_t stream) {
     static const bool configured = [] {
-        CUDA_CHECK(cudaFuncSetAttribute(ada_small_t_mma_kernel<S, K, RowMap, Epilogue>,
+        CUDA_CHECK(cudaFuncSetAttribute(ada_small_t_mma_kernel<S, K, RowMap, Epilogue, false>,
                                         cudaFuncAttributeMaxDynamicSharedMemorySize,
                                         S::kSmemBytes));
         return true;
     }();
     (void)configured;
-    ada_small_t_mma_kernel<S, K, RowMap, Epilogue>
+    ada_small_t_mma_kernel<S, K, RowMap, Epilogue, false>
         <<<rows / S::kRowsPerCta, S::kThreads, S::kSmemBytes, stream>>>(x, x_ld, codes, high,
-                                                                        scales, tokens, epilogue);
+                                                                        scales, tokens, nullptr,
+                                                                        0.0f, false, epilogue);
+}
+
+template <class S, int K, class RowMap = AdaContiguousRows, class Epilogue>
+void ada_small_t_mma_rmsnorm_launch(const __nv_bfloat16* x, std::int32_t x_ld,
+                                    const std::uint8_t* codes, const std::uint8_t* high,
+                                    const std::uint8_t* scales, std::int32_t rows,
+                                    std::int32_t tokens, const __nv_bfloat16* norm_weight,
+                                    float norm_eps, bool norm_unit_offset, Epilogue epilogue,
+                                    cudaStream_t stream) {
+    static_assert(S::kTokenTiles == 1);
+    static const bool configured = [] {
+        CUDA_CHECK(cudaFuncSetAttribute(ada_small_t_mma_kernel<S, K, RowMap, Epilogue, true>,
+                                        cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                        S::kSmemBytes));
+        return true;
+    }();
+    (void)configured;
+    ada_small_t_mma_kernel<S, K, RowMap, Epilogue, true>
+        <<<rows / S::kRowsPerCta, S::kThreads, S::kSmemBytes, stream>>>(
+            x, x_ld, codes, high, scales, tokens, norm_weight, norm_eps, norm_unit_offset,
+            epilogue);
 }
 
 } // namespace ninfer::ops::detail

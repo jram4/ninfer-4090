@@ -25,6 +25,7 @@
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_pair.h"
 #include "ninfer/ops/linear_swiglu.h"
+#include "ninfer/ops/rmsnorm_linear_swiglu.h"
 #include "ninfer/ops/mtp_pack.h"
 #include "ninfer/ops/position.h"
 #include "ninfer/ops/residual_add.h"
@@ -1133,6 +1134,18 @@ ops::SparseMoeHints TextContext::next_projection_hints(int layer) const {
 
 void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase,
                            const ops::SparseMoeHints& hints) {
+    const auto* dense = std::get_if<DenseParameters>(&weights.ffn);
+    if (dense != nullptr && dense->gate_up.weight.qtype == QType::Q4_G64_FP16 &&
+        dense->gate_up.weight.n == 34816 && dense->gate_up.weight.k == 5120 &&
+        x.ne[0] == 5120 && x.ne[1] >= 2 && x.ne[1] <= 8) {
+        auto fused_scope = work_.scope();
+        Tensor activation = work_.alloc(DType::BF16,
+                                        {dimension(dense->gate_up.weight.n / 2), x.ne[1]});
+        ops::rmsnorm_linear_swiglu(x, weights.post_attention_norm, config_.rms_norm_eps, true,
+                                   dense->gate_up.weight, activation, ctx_.stream);
+        ops::linear_add(activation, dense->down.weight, x, dense->down.policy, work_, ctx_.stream);
+        return;
+    }
     Tensor h = workspace::post_mixer_hidden(work_, config_, x.ne[1]);
     ops::rmsnorm(x, weights.post_attention_norm, config_.rms_norm_eps, true, h, ctx_.stream);
     ffn(h, weights.ffn, x, hints, work_, ctx_.stream);

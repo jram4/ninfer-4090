@@ -64,4 +64,28 @@ void q4_linear_swiglu_ada_small_t_launch(const Tensor& x, const Weight& w, Tenso
     launch<4, 8, 8, 3>(x, w, out, stream);
 }
 
+void q4_rmsnorm_linear_swiglu_small_t_launch(const Tensor& x, const Tensor& norm_weight,
+                                              float eps, bool unit_offset, const Weight& w,
+                                              Tensor& out, cudaStream_t stream) {
+    if (w.n != kGateUpRows || w.k != kHidden || w.padded_shape[1] != kHidden) {
+        throw std::invalid_argument(
+            "q4 rmsnorm_linear_swiglu requires gate/up weight [34816,5120]");
+    }
+    if (x.ne[1] < 2 || x.ne[1] > 8 || norm_weight.ne[0] != kHidden) {
+        throw std::invalid_argument("q4 rmsnorm_linear_swiglu requires T in [2,8]");
+    }
+    const SwiGluEpilogue epilogue{static_cast<__nv_bfloat16*>(out.data),
+                                  static_cast<std::int32_t>(out.nb[1] / sizeof(__nv_bfloat16))};
+    using Rows = AdaPairedHalfRows<kIntermediate>;
+    using S = Q4AdaSmallTSchedule<4, 8, 1, 8, 3>;
+    static_assert(kGateUpRows % S::kRowsPerCta == 0);
+    ada_small_t_mma_rmsnorm_launch<S, kHidden, Rows>(
+        static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<std::int32_t>(x.nb[1] / sizeof(__nv_bfloat16)),
+        static_cast<const std::uint8_t*>(w.qdata), nullptr,
+        static_cast<const std::uint8_t*>(w.scales), kGateUpRows, x.ne[1],
+        static_cast<const __nv_bfloat16*>(norm_weight.data), eps, unit_offset, epilogue, stream);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace ninfer::ops::detail

@@ -5,6 +5,7 @@
 #include "core/device.h"
 #include "core/decode_graph.h"
 #include "ninfer/ops/linear_swiglu.h"
+#include "ninfer/ops/rmsnorm_linear_swiglu.h"
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 
@@ -105,6 +106,41 @@ std::vector<std::uint16_t> make_activation(const Profile& profile, std::int32_t 
         }
     }
     return activation;
+}
+
+std::vector<std::uint16_t> make_norm_weight(const Profile& profile) {
+    std::vector<std::uint16_t> weight(static_cast<std::size_t>(profile.input_rows));
+    for (std::int32_t index = 0; index < profile.input_rows; ++index) {
+        const std::uint64_t mixed = mix64((static_cast<std::uint64_t>(profile.seed + 2U) << 32) |
+                                          static_cast<std::uint32_t>(index));
+        const int numerator = static_cast<int>((mixed >> 48) % 33U) - 16;
+        weight[static_cast<std::size_t>(index)] = test::f32_to_bf16(
+            static_cast<float>(numerator) * (1.0F / 32.0F));
+    }
+    return weight;
+}
+
+std::vector<std::uint16_t> rmsnorm_bf16_oracle(const std::vector<std::uint16_t>& input,
+                                               const std::vector<std::uint16_t>& weight,
+                                               std::int32_t width, std::int32_t tokens,
+                                               float eps) {
+    std::vector<std::uint16_t> output(checked_elements(width, tokens, "RMSNorm oracle size"));
+    for (std::int32_t token = 0; token < tokens; ++token) {
+        double sum = 0.0;
+        for (std::int32_t index = 0; index < width; ++index) {
+            const double value = test::bf16_to_f32(
+                input[static_cast<std::size_t>(token) * width + index]);
+            sum += value * value;
+        }
+        const double inverse = 1.0 / std::sqrt(sum / static_cast<double>(width) + eps);
+        for (std::int32_t index = 0; index < width; ++index) {
+            const std::size_t offset = static_cast<std::size_t>(token) * width + index;
+            const double value = test::bf16_to_f32(input[offset]);
+            const double gain = 1.0 + test::bf16_to_f32(weight[static_cast<std::size_t>(index)]);
+            output[offset] = test::f32_to_bf16(static_cast<float>(value * inverse * gain));
+        }
+    }
+    return output;
 }
 
 struct ActiveValue {
@@ -247,8 +283,12 @@ void validate_profile(const Profile& profile) {
 
 int run_profile(std::string_view label, const Profile& profile,
                 std::span<const std::int32_t> token_cases,
-                std::span<const std::int32_t> graph_cases) {
+                std::span<const std::int32_t> graph_cases, bool rmsnorm_input) {
     validate_profile(profile);
+    if (rmsnorm_input && (profile.qtype != QType::Q4_G64_FP16 || profile.input_rows != 5120 ||
+                          profile.output_rows != 17408)) {
+        throw std::invalid_argument("linear_swiglu test: fused RMSNorm supports the registered Q4 profile");
+    }
     if (token_cases.empty()) { throw std::invalid_argument("linear_swiglu test: no token cases"); }
     if (!cuda_available()) {
         std::cout << "SKIP: no usable CUDA device\n";
@@ -263,6 +303,9 @@ int run_profile(std::string_view label, const Profile& profile,
         }
     }
     const std::int32_t maximum_tokens = token_cases.back();
+    if (rmsnorm_input && (token_cases.front() < 2 || maximum_tokens > 8)) {
+        throw std::invalid_argument("linear_swiglu test: fused RMSNorm requires T in [2,8]");
+    }
     for (int tokens : graph_cases)
         if (tokens <= 0 || tokens > maximum_tokens)
             throw std::invalid_argument("graph case outside oracle extent");
@@ -275,16 +318,27 @@ int run_profile(std::string_view label, const Profile& profile,
     quantized_weight::PackedWeight host_weight = quantized_weight::make_patterned_weight(
         profile.qtype, profile.gate_up_rows, profile.input_rows, profile.seed, weight_options);
     const std::vector<std::uint16_t> host_activation = make_activation(profile, maximum_tokens);
+    constexpr float kRmsNormEps = 1.0e-6F;
+    const std::vector<std::uint16_t> host_norm_weight = make_norm_weight(profile);
+    const std::vector<std::uint16_t> reference_activation =
+        rmsnorm_input ? rmsnorm_bf16_oracle(host_activation, host_norm_weight, profile.input_rows,
+                                            maximum_tokens, kRmsNormEps)
+                      : host_activation;
     const std::vector<double> reference =
-        linear_swiglu_oracle_fp64(profile, host_weight, host_activation, maximum_tokens);
+        linear_swiglu_oracle_fp64(profile, host_weight, reference_activation, maximum_tokens);
     std::vector<std::uint16_t> negative_activation;
+    std::vector<std::uint16_t> negative_reference_activation;
     std::vector<double> negative_reference;
     std::optional<DeviceContext> graph_context;
     if (!graph_cases.empty()) {
         negative_activation = host_activation;
         for (auto& bits : negative_activation) bits ^= 0x8000;
-        negative_reference =
-            linear_swiglu_oracle_fp64(profile, host_weight, negative_activation, maximum_tokens);
+        negative_reference_activation =
+            rmsnorm_input ? rmsnorm_bf16_oracle(negative_activation, host_norm_weight,
+                                                profile.input_rows, maximum_tokens, kRmsNormEps)
+                          : negative_activation;
+        negative_reference = linear_swiglu_oracle_fp64(
+            profile, host_weight, negative_reference_activation, maximum_tokens);
         graph_context.emplace();
     }
 
@@ -295,6 +349,12 @@ int run_profile(std::string_view label, const Profile& profile,
     test::GuardedDeviceBuffer device_activation(host_activation.size() * sizeof(std::uint16_t));
     device_activation.copy_from_host(host_activation.data(),
                                      host_activation.size() * sizeof(std::uint16_t));
+    std::optional<test::GuardedDeviceBuffer> device_norm_weight;
+    if (rmsnorm_input) {
+        device_norm_weight.emplace(host_norm_weight.size() * sizeof(std::uint16_t));
+        device_norm_weight->copy_from_host(host_norm_weight.data(),
+                                           host_norm_weight.size() * sizeof(std::uint16_t));
+    }
 
     const ops::LinearPolicy policy =
         profile.activation_compute == ActivationCompute::A4
@@ -310,12 +370,19 @@ int run_profile(std::string_view label, const Profile& profile,
         const auto elements = checked_elements(profile.output_rows, tokens, "output size");
         test::GuardedDeviceBuffer output(elements * sizeof(std::uint16_t));
         Tensor x(device_activation.data(), DType::BF16, {profile.input_rows, tokens});
+        Tensor norm_weight_tensor(device_norm_weight ? device_norm_weight->data() : nullptr,
+                                  DType::BF16, {profile.input_rows});
         Tensor destination(output.data(), DType::BF16, {profile.output_rows, tokens});
         workspace.reset();
         workspace.reset_peak();
         const cudaStream_t stream = replay ? graph_context->stream : nullptr;
         const auto launch         = [&] {
-            ops::linear_swiglu(x, weight, destination, policy, workspace, stream);
+            if (rmsnorm_input) {
+                ops::rmsnorm_linear_swiglu(x, norm_weight_tensor, kRmsNormEps, true, weight,
+                                           destination, stream);
+            } else {
+                ops::linear_swiglu(x, weight, destination, policy, workspace, stream);
+            }
         };
         const std::string label_case =
             std::string(label) + " T=" + std::to_string(tokens) + (replay ? " graph" : " eager");
@@ -376,6 +443,12 @@ int run_profile(std::string_view label, const Profile& profile,
                                  final_input.data(), final_input.size() * sizeof(std::uint16_t));
     failures += verify_unchanged(std::string(label) + " weight", device_weight,
                                  host_weight.payload.data(), host_weight.payload.size());
+    if (device_norm_weight) {
+        failures += device_norm_weight->verify_guards(std::string(label) + " norm weight");
+        failures += verify_unchanged(std::string(label) + " norm weight", *device_norm_weight,
+                                     host_norm_weight.data(),
+                                     host_norm_weight.size() * sizeof(std::uint16_t));
+    }
     return failures;
 }
 

@@ -46,5 +46,8 @@ void q4_linear_swiglu_execute_plan(const Q4LinearSwiGluPlan& plan, const Tensor&
                                    Tensor& out, WorkspaceArena& ws, cudaStream_t stream);
 void q4_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, WorkspaceArena& ws,
                                cudaStream_t stream);
+void q4_rmsnorm_linear_swiglu_small_t_launch(const Tensor& x, const Tensor& norm_weight,
+                                              float eps, bool unit_offset, const Weight& w,
+                                              Tensor& out, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail
