@@ -327,6 +327,8 @@ def validate_policy(value: dict[str, Any]) -> dict[str, Any]:
         _identifier(result[key], f"policy.{key}")
     if type(result["qualification_enabled"]) is not bool:
         raise ValueError("policy.qualification_enabled must be boolean")
+    if result["qualification_enabled"]:
+        _validate_qualification_contract(contract)
     stages = result["stages"]
     if not isinstance(stages, list) or [item.get("name") if isinstance(item, dict) else None for item in stages] != list(_STAGES):
         raise ValueError("policy stages must be admission, build, correctness, smoke, screen, full in order")
@@ -351,6 +353,60 @@ def validate_policy(value: dict[str, Any]) -> dict[str, Any]:
     if result["policy_id"] != expected_policy_id:
         raise ValueError("policy_id does not match policy identity")
     return result
+
+
+def _positive_int(value: Any, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{label} must be a positive integer")
+    return value
+
+
+def _content_identity(value: Any, label: str, *, size_required: bool = False) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a content-identity object")
+    _hash(value.get("sha256"), f"{label}.sha256")
+    if size_required or "size_bytes" in value:
+        _positive_int(value.get("size_bytes"), f"{label}.size_bytes")
+    return value
+
+
+def _validate_qualification_contract(contract: dict[str, Any]) -> None:
+    """Reject unknown/incomplete locks whenever qualification is enabled."""
+    model = _content_identity(contract["model_artifact"], "policy.contract.model_artifact", size_required=True)
+    _content_identity(contract["template"], "policy.contract.template")
+    tokenizer = contract["tokenizer"]
+    if not isinstance(tokenizer, dict):
+        raise ValueError("policy.contract.tokenizer must carry a content identity")
+    if (
+        "embedded_in_model_artifact_sha256" in tokenizer
+        and tokenizer["embedded_in_model_artifact_sha256"] != model["sha256"]
+    ):
+        raise ValueError("embedded tokenizer identity must match model_artifact.sha256")
+    if "sha256" in tokenizer:
+        _content_identity(tokenizer, "policy.contract.tokenizer")
+    elif tokenizer.get("embedded_in_model_artifact_sha256") != model["sha256"]:
+        raise ValueError(
+            "policy.contract.tokenizer requires sha256 or an embedded artifact hash matching model_artifact"
+        )
+    elif set(tokenizer) != {"embedded_in_model_artifact_sha256"}:
+        raise ValueError("embedded tokenizer lock has unsupported fields")
+    runtime = contract["runtime"]
+    if not isinstance(runtime, dict):
+        raise ValueError("policy.contract.runtime must carry locked runtime details")
+    _content_identity(runtime.get("binary"), "policy.contract.runtime.binary", size_required=True)
+    _commit(runtime.get("release_source_commit"), "policy.contract.runtime.release_source_commit")
+    kv_dtype = _nonempty(runtime.get("kv_dtype"), "policy.contract.runtime.kv_dtype")
+    if kv_dtype.lower() in {"unknown", "unspecified", "pending", "none"}:
+        raise ValueError("qualification policy must explicitly lock runtime.kv_dtype")
+    _positive_int(runtime.get("max_context"), "policy.contract.runtime.max_context")
+    _positive_int(runtime.get("kv_capacity"), "policy.contract.runtime.kv_capacity")
+    sampling = runtime.get("sampling_capabilities")
+    if not isinstance(sampling, dict) or not sampling:
+        raise ValueError("policy.contract.runtime.sampling_capabilities must be a nonempty capability lock")
+    for name, enabled in sampling.items():
+        _identifier(name, "policy.contract.runtime.sampling_capabilities key")
+        if type(enabled) is not bool:
+            raise ValueError(f"sampling capability {name!r} must be boolean")
 
 
 def validate_receipt(value: dict[str, Any]) -> dict[str, Any]:

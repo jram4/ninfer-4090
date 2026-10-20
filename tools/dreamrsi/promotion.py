@@ -6,11 +6,12 @@ import argparse
 import json
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 from typing import Any
 
-from .contracts import canonical_hash, read_json, validate_receipt
+from .contracts import canonical_hash, read_json, validate_policy, validate_receipt, sha256_file
 from .submit import SubmissionError, _manifest_from_commit
 
 
@@ -52,6 +53,128 @@ def _is_bare(repo: Path) -> bool:
     return _git(repo, "rev-parse", "--is-bare-repository").stdout.strip() == b"true"
 
 
+def _repo_boundary(repo: Path) -> Path:
+    top = _git(repo, "rev-parse", "--show-toplevel", check=False)
+    if top.returncode == 0:
+        return Path(top.stdout.decode("utf-8").strip()).resolve()
+    _git(repo, "rev-parse", "--git-dir")
+    return repo.resolve()
+
+
+def _under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _has_symlink_component(path: Path, *, stop: Path | None = None) -> bool:
+    cursor = Path(path.anchor)
+    for component in path.parts[1:]:
+        cursor /= component
+        if stop is not None and cursor == stop:
+            continue
+        if cursor.is_symlink():
+            return True
+    return False
+
+
+def _trusted_promotion_reasons(
+    repository_boundary: Path,
+    receipt: dict[str, Any],
+    *,
+    receipt_path: Path | None,
+    trusted_receipt_root: Path | None,
+    trusted_policy_path: Path | None,
+    authorize: bool,
+) -> list[str]:
+    reasons: list[str] = []
+    if not authorize:
+        reasons.append("actual promotion requires explicit caller authorization (authorize=True)")
+    if trusted_receipt_root is None:
+        reasons.append("actual promotion requires trusted_receipt_root")
+    if trusted_policy_path is None:
+        reasons.append("actual promotion requires trusted_policy_path")
+    if receipt_path is None:
+        reasons.append("actual promotion requires receipt_path inside the trusted judge root")
+    if trusted_receipt_root is None or trusted_policy_path is None or receipt_path is None:
+        return reasons
+
+    normalized_receipt: dict[str, Any] | None = None
+    try:
+        normalized_receipt = validate_receipt(receipt)
+        root = Path(trusted_receipt_root).expanduser().resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError("trusted_receipt_root is not a directory")
+        if _under(root, repository_boundary):
+            raise ValueError("trusted_receipt_root must be outside the candidate repository")
+        raw_receipt_path = Path(receipt_path).expanduser()
+        if ".." in raw_receipt_path.parts:
+            raise ValueError("receipt_path must not contain parent traversal")
+        lexical_receipt = (root / raw_receipt_path) if not raw_receipt_path.is_absolute() else raw_receipt_path
+        if _has_symlink_component(lexical_receipt.absolute(), stop=root):
+            raise ValueError("receipt_path must not traverse symlinks")
+        resolved_receipt = lexical_receipt.resolve(strict=True)
+        if not _under(resolved_receipt, root):
+            raise ValueError("receipt_path is outside trusted_receipt_root")
+        receipt_rel = resolved_receipt.relative_to(root)
+        if not resolved_receipt.is_file():
+            raise ValueError("receipt_path must resolve to a regular non-symlink file")
+        disk_receipt = validate_receipt(read_json(resolved_receipt))
+        if canonical_hash(disk_receipt) != canonical_hash(normalized_receipt):
+            raise ValueError("supplied receipt differs from the trusted receipt file")
+        # Keep the path binding explicit even when a caller supplied an absolute
+        # path; relative paths are rooted at the operator-controlled judge store.
+        if not receipt_rel.parts:
+            raise ValueError("receipt_path must name a file below trusted_receipt_root")
+        for reference in normalized_receipt["evidence"]:
+            evidence_path = Path(reference["path"])
+            if (
+                evidence_path.is_absolute()
+                or not evidence_path.parts
+                or ".." in evidence_path.parts
+                or "\\" in reference["path"]
+                or evidence_path.as_posix() != reference["path"]
+            ):
+                raise ValueError("evidence paths must be safe relative paths under trusted_receipt_root")
+            lexical_evidence = root / evidence_path
+            if _has_symlink_component(lexical_evidence, stop=root):
+                raise ValueError("evidence reference traverses a symlink in trusted_receipt_root")
+            resolved_evidence = lexical_evidence.resolve(strict=True)
+            if not _under(resolved_evidence, root):
+                raise ValueError("evidence reference escapes or traverses a symlink in trusted_receipt_root")
+            metadata = resolved_evidence.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("evidence reference is not a regular file")
+            if sha256_file(resolved_evidence) != reference["sha256"]:
+                raise ValueError(f"evidence hash mismatch: {reference['path']}")
+    except (OSError, ValueError) as exc:
+        reasons.append(f"trusted receipt/evidence verification failed: {exc}")
+
+    try:
+        if normalized_receipt is None:
+            raise ValueError("receipt is not valid under the shared receipt contract")
+        raw_policy_path = Path(trusted_policy_path).expanduser()
+        if _has_symlink_component(raw_policy_path.absolute()):
+            raise ValueError("trusted policy path must not traverse symlinks")
+        policy_path = raw_policy_path.resolve(strict=True)
+        if _under(policy_path, repository_boundary):
+            raise ValueError("trusted policy must be a non-symlink file outside the candidate repository")
+        if not policy_path.is_file():
+            raise ValueError("trusted_policy_path is not a file")
+        policy = validate_policy(read_json(policy_path))
+        if policy["policy_id"] != normalized_receipt["policy_id"]:
+            raise ValueError("trusted policy_id does not match receipt")
+        if policy["contract_id"] != normalized_receipt["contract_id"]:
+            raise ValueError("trusted policy contract_id does not match receipt")
+        if policy["qualification_enabled"] is not True:
+            raise ValueError("trusted policy does not explicitly enable qualification")
+    except (OSError, ValueError) as exc:
+        reasons.append(f"trusted policy verification failed: {exc}")
+    return reasons
+
+
 def _receipt_reasons(
     repo: Path,
     candidate_commit: str,
@@ -73,12 +196,8 @@ def _receipt_reasons(
         reasons.append("receipt candidate_commit does not bind the candidate")
     if normalized.get("base_commit") != expected_main:
         reasons.append("receipt base_commit does not bind expected_main")
-    if normalized.get("qualification_enabled") is not True:
-        reasons.append("receipt does not prove qualification was explicitly enabled")
-    if normalized.get("promotion_authorized") is not True:
-        reasons.append("receipt does not include explicit promotion authorization")
     if not normalized["evidence"]:
-        reasons.append("receipt has no immutable evidence references")
+        reasons.append("receipt has no evidence references")
     try:
         manifest, _ = _manifest_from_commit(repo, candidate_commit)
         actual_snapshot = canonical_hash(manifest)
@@ -96,6 +215,10 @@ def _plan(
     receipt: dict[str, Any],
     *,
     shadow: bool,
+    receipt_path: Path | None,
+    trusted_receipt_root: Path | None,
+    trusted_policy_path: Path | None,
+    authorize: bool,
 ) -> dict[str, Any]:
     repository = Path(repo).expanduser().resolve(strict=True)
     top = _git(repository, "rev-parse", "--show-toplevel", check=False)
@@ -117,6 +240,14 @@ def _plan(
     if ancestor.returncode != 0:
         reasons.append("candidate is unrelated to expected_main or does not descend from it")
     reasons.extend(_receipt_reasons(repository, candidate, expected, receipt))
+    reasons.extend(_trusted_promotion_reasons(
+        _repo_boundary(repository),
+        receipt,
+        receipt_path=receipt_path,
+        trusted_receipt_root=trusted_receipt_root,
+        trusted_policy_path=trusted_policy_path,
+        authorize=authorize,
+    ))
     bare = _is_bare(repository)
     if not shadow and not bare:
         reasons.append("actual promotion requires a dedicated bare target; checked-out refs are never advanced")
@@ -140,11 +271,21 @@ def plan_promotion(
     receipt: dict[str, Any],
     *,
     shadow: bool = True,
+    receipt_path: Path | None = None,
+    trusted_receipt_root: Path | None = None,
+    trusted_policy_path: Path | None = None,
+    authorize: bool = False,
 ) -> dict[str, Any]:
     """Return a side-effect-free plan; shadow mode is the default."""
     if type(shadow) is not bool:
         raise ValueError("shadow must be boolean")
-    return _plan(repo, candidate_commit, expected_main, receipt, shadow=shadow)
+    if type(authorize) is not bool:
+        raise ValueError("authorize must be boolean")
+    return _plan(
+        repo, candidate_commit, expected_main, receipt, shadow=shadow,
+        receipt_path=receipt_path, trusted_receipt_root=trusted_receipt_root,
+        trusted_policy_path=trusted_policy_path, authorize=authorize,
+    )
 
 
 def promote(
@@ -154,11 +295,21 @@ def promote(
     receipt: dict[str, Any],
     *,
     shadow: bool = True,
+    receipt_path: Path | None = None,
+    trusted_receipt_root: Path | None = None,
+    trusted_policy_path: Path | None = None,
+    authorize: bool = False,
 ) -> dict[str, Any]:
     """Plan by default, or CAS-update main in an explicitly selected bare repo."""
     if type(shadow) is not bool:
         raise ValueError("shadow must be boolean")
-    plan = _plan(repo, candidate_commit, expected_main, receipt, shadow=shadow)
+    if type(authorize) is not bool:
+        raise ValueError("authorize must be boolean")
+    plan = _plan(
+        repo, candidate_commit, expected_main, receipt, shadow=shadow,
+        receipt_path=receipt_path, trusted_receipt_root=trusted_receipt_root,
+        trusted_policy_path=trusted_policy_path, authorize=authorize,
+    )
     if shadow:
         return plan
     if not plan["ready"]:
@@ -179,7 +330,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidate-commit", required=True)
     parser.add_argument("--expected-main", required=True)
     parser.add_argument("--receipt", type=Path, required=True)
+    parser.add_argument("--trusted-receipt-root", type=Path)
+    parser.add_argument("--trusted-policy", type=Path)
     parser.add_argument("--promote", action="store_true", help="CAS-update main in a bare target (default: shadow plan)")
+    parser.add_argument("--authorize", action="store_true", help="explicit caller authorization required with --promote")
     args = parser.parse_args(argv)
     try:
         result = promote(
@@ -188,6 +342,10 @@ def main(argv: list[str] | None = None) -> int:
             args.expected_main,
             read_json(args.receipt),
             shadow=not args.promote,
+            receipt_path=args.receipt,
+            trusted_receipt_root=args.trusted_receipt_root,
+            trusted_policy_path=args.trusted_policy,
+            authorize=args.authorize,
         )
         print(json.dumps(result, sort_keys=True))
         return 0

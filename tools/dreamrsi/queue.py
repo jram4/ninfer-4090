@@ -246,7 +246,7 @@ class Queue:
             row = connection.execute(
                 "SELECT * FROM submissions WHERE status = 'queued' ORDER BY sequence LIMIT 1"
             ).fetchone()
-            if row is None or row["worker_id"] != worker_id:
+            if row is None:
                 return None
             submission = json.loads(row["submission_json"])
             archive_path = Path(submission["source"]["archive_path"])
