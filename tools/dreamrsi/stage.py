@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
@@ -103,14 +104,33 @@ def _toolchain_path() -> str:
     return ":".join(parts)
 
 
-def _command_version(argv: list[str], environment: dict[str, str] | None = None) -> str | None:
+def _command_output(argv: list[str], environment: dict[str, str] | None = None) -> str:
     try:
         completed = subprocess.run(argv, capture_output=True, text=True, timeout=60, check=False,
                                    env=environment)
     except (OSError, subprocess.SubprocessError):
+        return ""
+    return (completed.stdout or completed.stderr or "").strip()
+
+
+def _cmake_version(environment: dict[str, str]) -> str | None:
+    output = _command_output(["cmake", "--version"], environment)
+    if not output:
         return None
-    output = (completed.stdout or completed.stderr or "").strip()
-    return output.splitlines()[0] if output else None
+    match = re.search(r"cmake version (\d+(?:\.\d+)*)", output, re.IGNORECASE)
+    return match.group(1) if match else output.splitlines()[0]
+
+
+def _cuda_version(environment: dict[str, str]) -> str | None:
+    output = _command_output(["nvcc", "--version"], environment)
+    if not output:
+        return None
+    # nvcc prints a banner first; the release version is on a later line.
+    match = re.search(r"release (\d+(?:\.\d+)*)", output, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    match = re.search(r"V(\d+(?:\.\d+)*)", output)
+    return match.group(1) if match else output.splitlines()[0]
 
 
 def stage_toolchain(_: argparse.Namespace) -> int:
@@ -118,8 +138,11 @@ def stage_toolchain(_: argparse.Namespace) -> int:
     report = _binding()
     environment = dict(os.environ)
     environment["PATH"] = _toolchain_path()
-    cmake = _command_version(["cmake", "--version"], environment)
-    nvcc = _command_version(["nvcc", "--version"], environment)
+    cmake = _cmake_version(environment)
+    cuda = _cuda_version(environment)
+    if cmake is None or cuda is None:
+        raise StageError("cmake and nvcc must both be runnable on the evaluation host")
+    report["toolchain"] = {"cmake": cmake, "cuda": cuda}
     if cmake is None or nvcc is None:
         raise StageError("cmake and nvcc must both be runnable on the evaluation host")
     report["toolchain"] = {"cmake": cmake, "cuda": nvcc}
