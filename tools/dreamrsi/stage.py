@@ -113,24 +113,36 @@ def _command_output(argv: list[str], environment: dict[str, str] | None = None) 
     return (completed.stdout or completed.stderr or "").strip()
 
 
+def _cmake_version_for(output: str) -> str:
+    match = re.search(r"cmake version (\d+(?:\.\d+)*)", output, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return output.strip().splitlines()[0] if output.strip() else ""
+
+
+def _cuda_version_for(output: str) -> str:
+    # nvcc prints a banner first; the release version is on a later line.
+    match = re.search(r"release (\d+(?:\.\d+)*)", output, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    match = re.search(r"V(\d+(?:\.\d+)*)", output)
+    if match:
+        return match.group(1)
+    return output.strip().splitlines()[0] if output.strip() else ""
+
+
 def _cmake_version(environment: dict[str, str]) -> str | None:
     output = _command_output(["cmake", "--version"], environment)
     if not output:
         return None
-    match = re.search(r"cmake version (\d+(?:\.\d+)*)", output, re.IGNORECASE)
-    return match.group(1) if match else output.splitlines()[0]
+    return _cmake_version_for(output)
 
 
 def _cuda_version(environment: dict[str, str]) -> str | None:
     output = _command_output(["nvcc", "--version"], environment)
     if not output:
         return None
-    # nvcc prints a banner first; the release version is on a later line.
-    match = re.search(r"release (\d+(?:\.\d+)*)", output, re.IGNORECASE)
-    if match:
-        return match.group(1)
-    match = re.search(r"V(\d+(?:\.\d+)*)", output)
-    return match.group(1) if match else output.splitlines()[0]
+    return _cuda_version_for(output)
 
 
 def stage_toolchain(_: argparse.Namespace) -> int:
@@ -143,9 +155,6 @@ def stage_toolchain(_: argparse.Namespace) -> int:
     if cmake is None or cuda is None:
         raise StageError("cmake and nvcc must both be runnable on the evaluation host")
     report["toolchain"] = {"cmake": cmake, "cuda": cuda}
-    if cmake is None or nvcc is None:
-        raise StageError("cmake and nvcc must both be runnable on the evaluation host")
-    report["toolchain"] = {"cmake": cmake, "cuda": nvcc}
     report["toolchain_id"] = os.environ.get("NINFER_TOOLCHAIN_ID")
     report["status"] = "pass"
     raw = _raw_dir() / "toolchain.json"

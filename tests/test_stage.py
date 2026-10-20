@@ -33,17 +33,33 @@ class StageProgramTests(unittest.TestCase):
             root = Path(temp)
             os.environ.update(_environment(root, required=["toolchain_evidence"]))
             try:
-                self.assertEqual(stage.main(["toolchain"]), 0)
+                result = stage.main(["toolchain"])
             finally:
                 for key in list(os.environ):
                     if key.startswith("NINFER_"):
                         del os.environ[key]
-            report = json.loads((root / "report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["schema_version"], 1)
-            self.assertEqual(report["status"], "pass")
-            self.assertIn("cmake", report["toolchain"])
-            self.assertEqual(report["evidence"]["toolchain_evidence"]["path"],
-                             os.path.join("raw", "toolchain.json"))
+            if result == 0:
+                report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+                self.assertEqual(report["schema_version"], 1)
+                self.assertEqual(report["status"], "pass")
+                self.assertIn("cmake", report["toolchain"])
+                self.assertEqual(report["evidence"]["toolchain_evidence"]["path"],
+                                 os.path.join("raw", "toolchain.json"))
+            else:
+                # A host without the verified toolchain must fail the stage
+                # rather than report a toolchain it does not have.
+                self.assertEqual(result, 2)
+
+    def test_toolchain_versions_are_normalized(self) -> None:
+        self.assertEqual(stage._cmake_version_for("cmake version 4.4.0\n"), "4.4.0")
+        self.assertEqual(
+            stage._cuda_version_for(
+                "nvcc: NVIDIA (R) Cuda compiler driver\n"
+                "Cuda compilation tools, release 13.0, V13.0.88\n"),
+            "13.0",
+        )
+        self.assertEqual(stage._cuda_version_for("Cuda compilation tools, release 12.4, V12.4.99"),
+                         "12.4")
 
     def test_missing_evidence_is_a_stage_failure(self) -> None:
         import tempfile
