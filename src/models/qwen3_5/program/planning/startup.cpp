@@ -501,10 +501,17 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         mtp_full_call(mtp_ar, 1, text_envelope, true);
         WorkspaceLayoutBuilder mtp_align;
         mtp_full_call(mtp_align, 1, text_envelope, false);
+        const std::int32_t proposal_rows =
+            plan.proposal_head == ProposalHead::Optimized
+                ? dimension(parameters.proposal->rows)
+                : dimension(config.vocab_size);
         WorkspaceLayoutBuilder mtp_proposal;
         proposal_scratch(mtp_proposal, 1);
-        const std::size_t accept = ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
-            dimension(parameters.model.resources().public_token_count), drafts, drafts, 1, 1);
+        scratch(mtp_proposal,
+                ops::sampling_workspace_capacity_bytes(proposal_rows, 1, 1));
+        const std::size_t accept = ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
+            dimension(parameters.model.resources().public_token_count), {false}, drafts, drafts, 1,
+            1);
         out.mtp_round = std::max({accept, finish(mtp_batch), finish(mtp_ar), finish(mtp_proposal)});
         out.ordinary_round = std::max(out.ordinary_round, finish(mtp_align));
 
@@ -539,10 +546,12 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             mtp_decode_core(ar, 1);
             WorkspaceLayoutBuilder proposal;
             proposal_scratch(proposal, batch);
+            scratch(proposal,
+                    ops::sampling_workspace_capacity_bytes(proposal_rows, batch, batch));
             const std::size_t batch_accept =
-                ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
-                    dimension(parameters.model.resources().public_token_count), drafts, drafts,
-                    batch, batch);
+                ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
+                    dimension(parameters.model.resources().public_token_count), {false}, drafts,
+                    drafts, batch, batch);
             out.mtp_round = std::max({out.mtp_round, finish(target), finish(alignment), finish(ar),
                                       finish(proposal), batch_accept});
         }

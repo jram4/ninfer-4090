@@ -32,6 +32,14 @@ Json base_request() {
                 {"max_tokens", 4096}};
 }
 
+Json title_schema_format() {
+    return Json{{"type", "json_schema"},
+                {"schema", Json{{"type", "object"},
+                            {"properties", Json{{"title", Json{{"type", "string"}}}}},
+                            {"required", Json::array({"title"})},
+                            {"additionalProperties", false}}}};
+}
+
 RequestLimits limits() {
     RequestLimits value;
     value.default_max_tokens = 8192;
@@ -133,9 +141,36 @@ int test_envelope_and_field_policy() {
     failures += check(api_param([&] { (void)parse(body); }) == "top_k",
                       "Engine top_k range was not enforced");
     body                  = base_request();
-    body["output_config"] = Json{{"format", Json{{"type", "json_schema"}}}};
+    body["stream"]        = true;
+    body["output_config"] = Json{{"effort", "high"}, {"format", title_schema_format()}};
+    body["tools"] = Json::array(
+        {Json{{"name", "Read"},
+              {"description", "Read a file"},
+              {"input_schema", Json{{"type", "object"},
+                                  {"properties", Json{{"file_path", Json{{"type", "string"}}}}}}}}});
+    const AnthropicMessagesRequest structured = parse(body);
+    failures += check(structured.structured_title && structured.stream &&
+                          structured.generation.reasoning_effort == RequestedReasoningEffort::High &&
+                          structured.generation.tools.size() == 1 &&
+                          !structured.generation.uses_tools(),
+                      "observed title JSON schema request with tools was not enabled");
+
+    body["output_config"]["format"]["schema"]["additionalProperties"] = true;
     failures += check(api_code([&] { (void)parse(body); }) == "output_config_format_not_supported",
-                      "structured output was silently downgraded");
+                      "unsupported schema constraint was silently accepted");
+    body["output_config"]["format"] = title_schema_format();
+    body["output_config"]["format"]["schema"]["properties"]["extra"] =
+        Json{{"type", "string"}};
+    failures += check(api_code([&] { (void)parse(body); }) == "output_config_format_not_supported",
+                      "extra schema property was silently accepted");
+    body["output_config"]["format"] = title_schema_format();
+    body["stream"] = false;
+    failures += check(api_code([&] { (void)parse(body); }) == "output_config_format_not_supported",
+                      "title schema without streaming was accepted");
+    body["stream"] = true;
+    body["output_config"]["effort"] = "low";
+    failures += check(api_code([&] { (void)parse(body); }) == "output_config_format_not_supported",
+                      "title schema without high effort was accepted");
     body              = base_request();
     body["container"] = "container_1";
     failures += check(api_code([&] { (void)parse(body); }) == "container_not_supported",
@@ -690,6 +725,109 @@ int test_tool_call_presentation() {
     return failures;
 }
 
+int test_structured_title_stream() {
+    const AnthropicResponseIdentity identity =
+        make_anthropic_response_identity("req_title", "claude-local");
+    AnthropicMessagesStream stream(identity, 100, true);
+    std::vector<std::string> events{stream.start(ninfer::GenerationStart{
+        .prompt               = ninfer::PromptSummary{.prompt_tokens = 100},
+        .reused_prompt_tokens = 60,
+    })};
+    auto append_events = [&](std::vector<std::string> values) {
+        events.insert(events.end(), std::make_move_iterator(values.begin()),
+                      std::make_move_iterator(values.end()));
+    };
+    append_events(stream.reasoning_delta("title thought"));
+    const bool model_text_buffered = stream.content_delta("```json\n").empty() &&
+                                     stream.content_delta(
+                                         R"({"title":"Review parser","extra":"drop"})")
+                                         .empty() &&
+                                     stream.content_delta("\n```").empty();
+
+    GenerationOutcome outcome;
+    outcome.text = "```json\n{\"title\":\"Review parser\",\"extra\":\"drop\"}\n```";
+    outcome.reasoning = "title thought";
+    outcome.prompt_tokens = 100;
+    outcome.completion_tokens = 17;
+    outcome.reasoning_tokens = 2;
+    outcome.metrics.prefix_cache_hit_tokens = 60;
+    outcome.finish_reason = ninfer::FinishReason::StopToken;
+    outcome.tool_calls.push_back(ninfer::GeneratedToolCall{
+        .name = "Read", .arguments_json = R"({"file_path":"x"})"});
+    append_events(stream.finish(outcome));
+
+    std::string json_text;
+    Json terminal_usage;
+    std::string terminal_stop;
+    std::vector<std::string> types;
+    bool saw_tool_block = false;
+    for (const std::string& wire : events) {
+        const Json parsed = parse_event(wire);
+        types.push_back(parsed.at("type").get<std::string>());
+        if (parsed.at("type") == "content_block_delta" &&
+            parsed.at("delta").at("type") == "text_delta") {
+            json_text += parsed.at("delta").at("text").get<std::string>();
+        }
+        if (parsed.at("type") == "content_block_start" &&
+            parsed.at("content_block").at("type") == "tool_use") {
+            saw_tool_block = true;
+        }
+        if (parsed.at("type") == "message_delta") {
+            terminal_usage = parsed.at("usage");
+            terminal_stop  = parsed.at("delta").at("stop_reason").get<std::string>();
+        }
+    }
+    const Json title = Json::parse(json_text);
+    const std::vector<std::string> expected_types{
+        "message_start", "content_block_start", "content_block_delta", "content_block_delta",
+        "content_block_stop", "content_block_start", "content_block_delta",
+        "content_block_stop", "message_delta", "message_stop"};
+    int failures = check(model_text_buffered && types == expected_types && !saw_tool_block &&
+                             terminal_stop == "end_turn" && title.is_object() &&
+                             title.size() == 1 && title.at("title") == "Review parser",
+                         "structured title stream did not buffer and emit valid schema-only SSE");
+    failures += check(terminal_usage["output_tokens"] == 17 &&
+                          terminal_usage["input_tokens"] == 40 &&
+                          terminal_usage["cache_read_input_tokens"] == 60,
+                      "structured title stream changed Engine usage accounting");
+
+    AnthropicMessagesStream fallback(identity, 10, true);
+    (void)fallback.start();
+    GenerationOutcome plain_text;
+    plain_text.text = "A plain title";
+    const std::vector<std::string> fallback_events = fallback.finish(plain_text);
+    const Json fallback_delta = parse_event(fallback_events.at(1));
+    const Json fallback_title =
+        Json::parse(fallback_delta.at("delta").at("text").get<std::string>());
+    failures += check(fallback_title.is_object() && fallback_title.size() == 1 &&
+                          fallback_title.at("title") == "A plain title",
+                      "plain model text was not safely projected into the title schema");
+
+    AnthropicMessagesStream json_string(identity, 10, true);
+    (void)json_string.start();
+    GenerationOutcome json_string_result;
+    json_string_result.text = R"("A quoted title")";
+    const std::vector<std::string> json_string_events = json_string.finish(json_string_result);
+    const Json json_string_wrapper = Json::parse(
+        parse_event(json_string_events.at(1)).at("delta").at("text").get<std::string>());
+    failures += check(json_string_wrapper.is_object() && json_string_wrapper.size() == 1 &&
+                          json_string_wrapper.at("title") == "A quoted title",
+                      "JSON string title was not projected to the title schema");
+
+    AnthropicMessagesStream tool_only(identity, 10, true);
+    (void)tool_only.start();
+    GenerationOutcome tool_only_outcome;
+    tool_only_outcome.tool_calls.push_back(ninfer::GeneratedToolCall{
+        .name = "Read", .arguments_json = R"({"file_path":"x"})"});
+    bool rejected_tool_only = false;
+    try {
+        (void)tool_only.finish(tool_only_outcome);
+    } catch (const std::logic_error&) { rejected_tool_only = true; }
+    failures += check(rejected_tool_only,
+                      "tool-call-only generation silently became an empty title");
+    return failures;
+}
+
 int test_stream() {
     const AnthropicResponseIdentity identity =
         make_anthropic_response_identity("req_stream", "claude-local");
@@ -782,6 +920,7 @@ int main() {
     failures += test_content_and_cache_hints();
     failures += test_aggregate_and_errors();
     failures += test_tool_call_presentation();
+    failures += test_structured_title_stream();
     failures += test_stream();
     if (failures != 0) {
         std::cerr << failures << " Anthropic adapter checks failed\n";

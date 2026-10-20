@@ -12,18 +12,30 @@ void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_
         throw std::logic_error("speculative target verify has no ReplaySSM record storage");
     }
     card.set_gdn_state_action(GdnStateAction::RecordForReplay, frame.replay_records);
+    const bool sparse_proposal = frame.proposal_q.data != nullptr;
     if (frame.feature_sink != nullptr) {
+        if (sparse_proposal) {
+            card.target_verify_batch(frame.ids, frame.cache_positions, frame.rope_positions,
+                                     frame.valid_columns, frame.kv_table_rows,
+                                     frame.state_source_slots, envelope, frame.target_hidden,
+                                     frame.target_logits, *frame.feature_sink);
+        } else {
+            card.target_verify_batch(frame.ids, frame.cache_positions, frame.rope_positions,
+                                     frame.valid_columns, frame.kv_table_rows,
+                                     frame.state_source_slots, envelope, frame.target_hidden,
+                                     frame.target_logits, frame.target_tokens, *frame.feature_sink);
+        }
+    } else if (sparse_proposal) {
         card.target_verify_batch(frame.ids, frame.cache_positions, frame.rope_positions,
                                  frame.valid_columns, frame.kv_table_rows, frame.state_source_slots,
-                                 envelope, frame.target_hidden, frame.target_logits,
-                                 frame.target_tokens, *frame.feature_sink);
+                                 envelope, frame.target_hidden, frame.target_logits);
     } else {
         card.target_verify_batch(frame.ids, frame.cache_positions, frame.rope_positions,
                                  frame.valid_columns, frame.kv_table_rows, frame.state_source_slots,
                                  envelope, frame.target_hidden, frame.target_logits,
                                  frame.target_tokens);
     }
-    if (frame.proposal_q.data != nullptr) {
+    if (sparse_proposal) {
         ops::speculative_accept_sparse_drafts(
             frame.target_tokens, frame.target_logits, frame.drafts, frame.candidate_ids,
             frame.proposal_q, frame.current_extents, frame.frontiers, frame.anchors,

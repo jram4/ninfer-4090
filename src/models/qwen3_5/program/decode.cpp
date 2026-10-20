@@ -472,6 +472,15 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             for (std::uint32_t j = 0; j < draft_window; ++j) {
                 mtp_host_ingress->current_drafts[row * draft_window + j] =
                     j < extent ? sequence.mtp_drafts[j] : sequence.ledger.back();
+                const std::size_t q_at =
+                    (row * draft_window + j) * qwen3_5::kMtpProposalCandidates;
+                for (std::uint32_t candidate = 0;
+                     candidate < qwen3_5::kMtpProposalCandidates; ++candidate) {
+                    mtp_host_ingress->current_candidate_ids[q_at + candidate] =
+                        sequence.mtp_candidate_ids[j][candidate];
+                    mtp_host_ingress->current_proposal_q[q_at + candidate] =
+                        sequence.mtp_proposal_q[j][candidate];
+                }
             }
             for (std::uint32_t j = 0; j < width; ++j) {
                 const std::uint32_t position = frontier + std::min(j, extent);

@@ -110,7 +110,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  * Op: speculative_accept_sparse_drafts
  *
  * Algorithm:
- *   This is the variable-K, 16-candidate form of speculative rejection sampling.
+ *   This is the variable-K sparse-candidate form (16 or 20 candidates) of speculative rejection sampling.
  *   For row b, let P=clamp(current_extents[b],0,K). Only target columns 0..P are live.
  *   Greedy rows accept the longest prefix matching the penalty-adjusted target argmax,
  *   then emit that argmax as correction/bonus. Positive-temperature rows construct p
@@ -120,10 +120,9 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *
  * Logical shapes and registered profile:
  *   All Tensor storage is contiguous. target_tokens/licensed_tokens are I32 [K+1,B].
- *   logits is BF16 [248320,K+1,B]; drafts is I32 [K,B]; candidate_ids is I32 [16,K,B];
- *   proposal_q is FP32 [16,K,B]. current_extents, round_lengths, round_anchors,
+ *   logits is BF16 [248320,K+1,B]; drafts is I32 [K,B]; candidate_ids is I32 [C,K,B] and proposal_q is FP32 [C,K,B], with C either 16 or 20. current_extents, round_lengths, round_anchors,
  *   licensed_counts, and accepted_drafts are I32 [B].
- *   The registered domain is token_domain=248077, K=1..15, B=1..8. Each live draft
+ *   The registered domain is K=1..15, B=1..8, and 1<=token_domain<=physical_rows. Each live draft
  *   position has distinct global candidate ids in [0,token_domain). proposal_q is the
  *   normalized FP32 distribution used to draw that draft; the draft occurs with positive q.
  *   For greedy rows without penalties, live target_tokens are the unpenalized target argmax

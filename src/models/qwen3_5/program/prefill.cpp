@@ -803,8 +803,27 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
         replay_fold->execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
                              device.stream);
 
-        // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
-        if (speculative_backend == SpeculativeBackend::DFlash2) {
+        // Sparse acceptance leaves persistent counts read-only. Publish only the prefix licensed
+        // by the Frontend before a later decode round consumes the count overlay.
+        if (speculative_backend == SpeculativeBackend::Mtp) {
+            if (!io.mtp_decode) {
+                throw std::logic_error("MTP token-count publication has no decode frame");
+            }
+            for (std::size_t row = 0; row < lanes.size(); ++row) {
+                if (cancelled[row] || !requests[lanes[row]].sampling_host.token_counts) {
+                    continue;
+                }
+                const auto count = static_cast<std::int32_t>(accepted_tokens[row]);
+                Tensor ids =
+                    io.mtp_decode->licensed_tokens.slice(1, static_cast<std::int32_t>(row), 1)
+                        .slice(0, 0, count)
+                        .view({count});
+                Tensor counts =
+                    token_counts.slice(1, static_cast<std::int32_t>(lanes[row]), 1)
+                        .view({dimension(parameters.model.resources().public_token_count)});
+                ops::increment_token_counts(ids, counts, device.stream);
+            }
+        } else if (speculative_backend == SpeculativeBackend::DFlash2) {
             for (std::size_t row = 0; row < lanes.size(); ++row) {
                 if (cancelled[row] || !requests[lanes[row]].sampling_host.token_counts) {
                     continue;
@@ -925,6 +944,15 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                     for (std::uint32_t step = 0; step < sequence.mtp_draft_count; ++step) {
                         sequence.mtp_drafts[step] =
                             mtp_host_egress->next_drafts[step * max_concurrency + row];
+                        const std::size_t q_at =
+                            (row * draft_window + step) * qwen3_5::kMtpProposalCandidates;
+                        for (std::uint32_t candidate = 0;
+                             candidate < qwen3_5::kMtpProposalCandidates; ++candidate) {
+                            sequence.mtp_candidate_ids[step][candidate] =
+                                mtp_host_egress->next_candidate_ids[q_at + candidate];
+                            sequence.mtp_proposal_q[step][candidate] =
+                                mtp_host_egress->next_proposal_q[q_at + candidate];
+                        }
                     }
                 }
             } else {
@@ -1205,6 +1233,15 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             sequence.mtp_draft_count = staged.initial_mtp_extent;
             std::copy_n(initial_drafts.begin(), staged.initial_mtp_extent,
                         sequence.mtp_drafts.begin());
+            const auto public_tokens = parameters.model.resources().public_token_count;
+            for (std::uint32_t step = 0; step < staged.initial_mtp_extent; ++step) {
+                for (std::uint32_t candidate = 0;
+                     candidate < qwen3_5::kMtpProposalCandidates; ++candidate) {
+                    sequence.mtp_candidate_ids[step][candidate] = static_cast<TokenId>(
+                        (initial_drafts[step] + candidate) % public_tokens);
+                    sequence.mtp_proposal_q[step][candidate] = candidate == 0 ? 1.0F : 0.0F;
+                }
+            }
         } else if (is_masked_draft_backend(speculative_backend) &&
                    sequence.dflash_context_frontier != prompt_tokens) {
             throw std::logic_error("staged DFlash prefill did not reach the prompt frontier");

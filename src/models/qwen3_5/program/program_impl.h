@@ -361,6 +361,10 @@ struct SequenceState {
     std::uint32_t mtp_kv_valid            = 0;
     std::uint32_t dflash_context_frontier = 0;
     std::array<TokenId, qwen3_5::kMtpDecodeMaximumDrafts> mtp_drafts{};
+    std::array<std::array<TokenId, qwen3_5::kMtpProposalCandidates>,
+               qwen3_5::kMtpDecodeMaximumDrafts> mtp_candidate_ids{};
+    std::array<std::array<float, qwen3_5::kMtpProposalCandidates>,
+               qwen3_5::kMtpDecodeMaximumDrafts> mtp_proposal_q{};
     std::uint32_t mtp_draft_count = 0;
     bool tail_hidden_valid        = false;
     bool endpoint_valid           = false;
