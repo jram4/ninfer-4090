@@ -179,6 +179,10 @@ def run_once(
             return True
         if state["status"] in {"cancel_requested", "cancelled", "completed"}:
             return True
+        if state.get("claim_token") != claim["claim_token"]:
+            # The claim was reclaimed by another worker. This one has no
+            # authority over the item and must not cancel or finish it.
+            return True
         if epochs is not None:
             try:
                 epoch_state = epochs.get_epoch(submission["epoch_id"])
@@ -186,8 +190,9 @@ def run_once(
                 return True
             if epoch_state["status"] == "cancelled":
                 try:
-                    queue.cancel(claim["submission_id"], "epoch cancelled during evaluation")
-                except (KeyError, QueueError):
+                    queue.cancel(claim["submission_id"], "epoch cancelled during evaluation",
+                                 claim_token=claim["claim_token"])
+                except (KeyError, QueueError, StaleClaimError):
                     return True
                 return True
         now = time.monotonic()
@@ -203,7 +208,11 @@ def run_once(
 
     try:
         if cancelled():
-            queue.cancel(claim["submission_id"], "cancelled before evaluation")
+            try:
+                queue.cancel(claim["submission_id"], "cancelled before evaluation",
+                             claim_token=claim["claim_token"])
+            except (KeyError, QueueError, StaleClaimError):
+                pass
             receipt = _receipt(
                 submission, verdict="blocked", stage="admission", failure_class=None
             )
@@ -215,7 +224,16 @@ def run_once(
         receipt = _receipt(
             submission, verdict="blocked", stage="admission", failure_class="infrastructure"
         )
-    record = queue.finish(claim["submission_id"], claim["claim_token"], receipt)
+    try:
+        record = queue.finish(claim["submission_id"], claim["claim_token"], receipt)
+    except StaleClaimError:
+        # Another worker owns this item now. Its result, not this one, decides.
+        return {
+            "submission_id": claim["submission_id"],
+            "status": "stale_claim",
+            "attempt": claim.get("attempt"),
+            "deferred": "the claim was reclaimed by another worker",
+        }
     event = None
     event_error = None
     if epochs is not None:

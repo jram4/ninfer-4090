@@ -142,6 +142,10 @@ class Queue:
             "submission": json.loads(row["submission_json"]),
             "receipt": json.loads(row["receipt_json"]) if row["receipt_json"] is not None else None,
             "attempt": row["attempt"],
+            # The claim identity lets a worker notice that its claim was
+            # reclaimed by another worker.
+            "claim_token": row["claim_token"],
+            "claim_worker": row["claim_worker"],
         }
 
     @staticmethod
@@ -378,9 +382,18 @@ class Queue:
                     raise StaleClaimError(f"claim for {submission_id!r} is stale")
         return self.get(submission_id)
 
-    def cancel(self, submission_id: str, reason: str = "cancelled by user") -> dict[str, Any]:
+    def cancel(self, submission_id: str, reason: str = "cancelled by user",
+               claim_token: str | None = None) -> dict[str, Any]:
+        """Cancel a submission.
+
+        When ``claim_token`` is given, a running item is only cancelled if the
+        caller still holds that claim. A worker whose lease expired must not be
+        able to cancel the claim a later worker now owns.
+        """
         if not isinstance(reason, str) or not reason.strip() or any(ord(c) < 0x20 and c not in "\t\n\r" for c in reason):
             raise ValueError("cancellation reason must be nonempty plain text")
+        if claim_token is not None and (not isinstance(claim_token, str) or not claim_token):
+            raise ValueError("claim_token must be a nonempty string when given")
         now = time.time()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -396,6 +409,9 @@ class Queue:
                     (reason, now, submission_id),
                 )
             elif row["status"] == "running":
+                if claim_token is not None and row["claim_token"] != claim_token:
+                    # The caller no longer owns this claim. Leave it alone.
+                    raise StaleClaimError(f"claim for {submission_id!r} is stale")
                 connection.execute(
                     """UPDATE submissions SET status = 'cancel_requested', cancel_reason = ?, updated_at = ?
                        WHERE submission_id = ? AND status = 'running'""",
