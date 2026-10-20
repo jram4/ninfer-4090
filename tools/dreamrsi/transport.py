@@ -379,9 +379,9 @@ class SSHExecutor:
         receipt_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         attempt_name, remote_attempt_root = _remote_attempt_root(remote_run_root, remote_receipt)
         local_attempt = receipt_root / normalized_submission["submission_id"] / attempt_name
-        local_attempt.mkdir(parents=True, exist_ok=False, mode=0o700)
+        local_attempt.mkdir(parents=True, exist_ok=True, mode=0o700)
         remote_receipt_bytes = _fetch_receipt_bytes(
-            self, remote_attempt_root, remote_receipt, _result_bytes(result, "stdout")
+            self, remote_attempt_root, remote_receipt, _result_bytes(result, "stdout"), local_attempt
         )
         (local_attempt / "remote-receipt.json").write_bytes(remote_receipt_bytes)
         (local_attempt / "remote-receipt.json").chmod(0o400)
@@ -510,10 +510,12 @@ def _remote_attempt_root(remote_run_root: PurePosixPath,
 
 
 def _fetch_receipt_bytes(executor: SSHExecutor, attempt_root: PurePosixPath,
-                         receipt: dict[str, Any], stdout_bytes: bytes) -> bytes:
+                         receipt: dict[str, Any], stdout_bytes: bytes,
+                         local_attempt: Path) -> bytes:
     if not receipt.get("evidence"):
         return stdout_bytes
-    local_temp = Path(executor.last_local_attempt) / "remote-receipt.tmp"
+    local_attempt.mkdir(parents=True, exist_ok=True, mode=0o700)
+    local_temp = local_attempt / "remote-receipt.tmp"
     executor._scp_download(attempt_root / "receipt.json", local_temp)
     raw = local_temp.read_bytes()
     try:

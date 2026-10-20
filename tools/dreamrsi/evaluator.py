@@ -124,7 +124,7 @@ def _identity_text(value: Any, field: str) -> str:
     return value
 
 
-def _validate_locked_contract(contract: Mapping[str, Any]) -> None:
+def _validate_locked_contract(contract: Mapping[str, Any], *, require_runtime_identity: bool = True) -> None:
     model = contract.get("model_artifact")
     template = contract.get("template")
     tokenizer = contract.get("tokenizer")
@@ -141,10 +141,14 @@ def _validate_locked_contract(contract: Mapping[str, Any]) -> None:
     model_hash = model.get("sha256")
     if tokenizer.get("embedded_in_model_artifact_sha256") is not None and tokenizer_hash != model_hash:
         raise EvaluationError("embedded tokenizer lock differs from model_artifact.sha256")
-    _sha256_text(runtime.get("binary", {}).get("sha256")
-                 if isinstance(runtime.get("binary"), Mapping) else None,
-                 "contract.runtime.binary.sha256")
-    _identity_text(runtime.get("release_source_commit"), "contract.runtime.release_source_commit")
+    if require_runtime_identity:
+        # The observed runtime must identify the exact binary it loaded and the
+        # source it was built from. The expected contract is the invariant one
+        # and deliberately carries no candidate identity.
+        _sha256_text(runtime.get("binary", {}).get("sha256")
+                     if isinstance(runtime.get("binary"), Mapping) else None,
+                     "contract.runtime.binary.sha256")
+        _identity_text(runtime.get("release_source_commit"), "contract.runtime.release_source_commit")
     if runtime.get("kv_dtype") != "k8v4":
         raise EvaluationError("contract.runtime.kv_dtype must be k8v4")
     if runtime.get("max_context") != 188416 or runtime.get("kv_capacity") != 188416:
@@ -1547,7 +1551,8 @@ def evaluate_submission(
             raise _PipelineFault("blocked", "admission", "infrastructure",
                                  "trusted policy has no expected runtime/model contract")
         try:
-            _validate_locked_contract(normalized_policy["contract"])
+            _validate_locked_contract(normalized_policy["contract"],
+                                     require_runtime_identity=False)
         except EvaluationError as exc:
             raise _PipelineFault("blocked", "admission", "infrastructure", str(exc)) from exc
         try:
