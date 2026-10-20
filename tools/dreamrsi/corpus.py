@@ -279,6 +279,7 @@ def make_plan(
     warmup_requests: int = 0,
     holdout_fraction: float = 0.25,
     stratum_weights: dict[str, float] | None = None,
+    strata: list[str] | None = None,
 ) -> JsonObject:
     """Build a budget-bounded, session-stratified screen/holdout plan.
 
@@ -286,8 +287,10 @@ def make_plan(
     total replay budget. Each selected session replays its captured sequence
     from sequence 1 through the last measured request; unmeasured requests in
     that prefix are explicit warmups. ``output_budget`` is only an optional
-    cohort filter. Captured request bodies and per-request budgets are never
-    rewritten.
+    cohort filter. ``strata`` optionally restricts the plan to a subset of the
+    observed strata, so a screen can target the dominant traffic class
+    without discarding the rest of the corpus. Captured request bodies and
+    per-request budgets are never rewritten.
     """
     samples_per_session = _positive_int(samples_per_session, "samples_per_session")
     if output_budget is not None:
@@ -313,7 +316,17 @@ def make_plan(
     traffic_classes = {row["traffic_class"] for row in source_rows}
     if len(traffic_classes) != 1:
         raise CorpusError("one corpus plan may contain only one traffic_class; plan real, generated, or derived traffic separately")
-    strata = sorted({row["stratum"] for row in source_rows})
+    observed_strata = sorted({row["stratum"] for row in source_rows})
+    if strata is None:
+        selected_strata = observed_strata
+    else:
+        if not isinstance(strata, list) or not strata:
+            raise CorpusError("strata must be a nonempty list when provided")
+        unknown = sorted(set(strata) - set(observed_strata))
+        if unknown:
+            raise CorpusError("strata not observed in the corpus: " + ", ".join(unknown))
+        selected_strata = sorted(set(strata))
+    strata = selected_strata
     weights: dict[str, float] | None = None
     if stratum_weights is not None:
         if not isinstance(stratum_weights, dict) or not stratum_weights:
@@ -570,6 +583,7 @@ def make_plan(
             "total_warmup_requests": warmup_count,
         },
         "stratum_weights": weights,
+        "observed_strata": observed_strata,
         "sessions": {
             "screen": screen_sessions,
             "holdout": holdout_sessions,
@@ -638,6 +652,7 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--warmup-requests", type=int, default=0, help="unmeasured warmups per arm")
     plan.add_argument("--holdout-fraction", type=float, default=0.25)
     plan.add_argument("--stratum-weights-json", type=Path, help="JSON object mapping every stratum to its production weight")
+    plan.add_argument("--strata", help="comma-separated strata to plan; omitted plans every observed stratum")
     plan.add_argument("--output", required=True, type=Path)
     return parser
 
@@ -663,6 +678,7 @@ def main(argv: list[str] | None = None) -> int:
             warmup_requests=args.warmup_requests,
             holdout_fraction=args.holdout_fraction,
             stratum_weights=weights,
+            strata=args.strata.split(",") if args.strata else None,
         )
         _write_json(args.output, plan)
     except (CorpusError, OSError, json.JSONDecodeError) as exc:

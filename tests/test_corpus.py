@@ -175,3 +175,29 @@ class CorpusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StratumFilterTests(unittest.TestCase):
+    def test_a_stratum_filter_restricts_the_plan_without_losing_the_rest(self) -> None:
+        descriptors = [
+            _descriptor(session, request, stratum="coding")
+            for session in range(6) for request in (2, 0, 1)
+        ] + [
+            _descriptor(session, request, stratum="prose")
+            for session in range(6, 9) for request in (2, 0, 1)
+        ]
+        plan = make_plan(descriptors, seed=5, samples_per_session=2, request_budget=64,
+                         cache_recipe_id="cache", cache_state="cold", warmup_requests=0,
+                         strata=["coding"])
+        self.assertEqual(plan["observed_strata"], ["coding", "prose"])
+        self.assertEqual([item["stratum"] for item in plan["coverage"]["strata"]], ["coding"])
+        selected = [row for split in plan["splits"].values() for row in split]
+        self.assertTrue(selected)
+        self.assertTrue(all(row["stratum"] == "coding" for row in selected))
+
+    def test_an_unobserved_stratum_is_refused(self) -> None:
+        descriptors = [_descriptor(session, 0) for session in range(4)]
+        with self.assertRaisesRegex(CorpusError, "not observed in the corpus"):
+            make_plan(descriptors, seed=5, samples_per_session=1, request_budget=8,
+                      cache_recipe_id="cache", cache_state="cold", warmup_requests=0,
+                      strata=["coding"])
