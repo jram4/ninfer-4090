@@ -207,7 +207,57 @@ def test_actual_promotion_requires_qualified_receipt_and_bare_target(tmp_path: P
 
     repo_plan = plan_promotion(repo, candidate, base, receipt, shadow=False)
     assert not repo_plan["ready"]
-    assert any("bare target" in reason for reason in repo_plan["reasons"])
+    assert any("uncommitted changes" in reason or "HEAD" in reason
+               for reason in repo_plan["reasons"])
+
+
+def test_actual_promotion_fast_forwards_a_clean_checkout(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path / "repo")
+    candidate = _git(repo, "rev-parse", "candidate")
+    policy = _policy()
+    submission = _freeze(
+        repo, tmp_path / "packages", policy_id=policy["policy_id"], contract_id=policy["contract_id"]
+    )
+    receipt = _receipt(submission, base)
+    trusted_root, receipt_path, policy_path = _trusted_files(tmp_path / "judge", receipt, policy)
+
+    # The checkout must sit on the expected base with a clean tree.
+    _git(repo, "checkout", "main")
+    _git(repo, "merge", "--ff-only", candidate)
+    _git(repo, "reset", "--hard", base)
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain=v1"],
+                            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert status.stdout.strip() == b""
+
+    result = promote(
+        repo, candidate, base, receipt, shadow=False,
+        receipt_path=receipt_path, trusted_receipt_root=trusted_root,
+        trusted_policy_path=policy_path, authorize=True,
+    )
+    assert result["mutation"] == "updated-main-ref-and-fast-forwarded-checkout"
+    assert _git(repo, "rev-parse", "refs/heads/main") == candidate
+    assert _git(repo, "rev-parse", "HEAD") == candidate
+
+
+def test_actual_promotion_refuses_a_dirty_checkout(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path / "repo")
+    candidate = _git(repo, "rev-parse", "candidate")
+    policy = _policy()
+    submission = _freeze(
+        repo, tmp_path / "packages", policy_id=policy["policy_id"], contract_id=policy["contract_id"]
+    )
+    receipt = _receipt(submission, base)
+    trusted_root, receipt_path, policy_path = _trusted_files(tmp_path / "judge", receipt, policy)
+    _git(repo, "checkout", "main")
+    _git(repo, "reset", "--hard", base)
+    (repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(PromotionError, match="uncommitted changes"):
+        promote(
+            repo, candidate, base, receipt, shadow=False,
+            receipt_path=receipt_path, trusted_receipt_root=trusted_root,
+            trusted_policy_path=policy_path, authorize=True,
+        )
+    assert _git(repo, "rev-parse", "refs/heads/main") == base
 
 
 def test_self_reported_authorization_does_not_grant_promotion(tmp_path: Path) -> None:

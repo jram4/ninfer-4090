@@ -250,7 +250,20 @@ def _plan(
     ))
     bare = _is_bare(repository)
     if not shadow and not bare:
-        reasons.append("actual promotion requires a dedicated bare target; checked-out refs are never advanced")
+        # A checked-out repository may only be advanced by a fast-forward of a
+        # clean worktree that still sits on the expected base.
+        head = _git(repository, "rev-parse", "--verify", "HEAD", check=False)
+        if head.returncode != 0:
+            reasons.append("actual promotion requires a checked-out HEAD to advance")
+        else:
+            current_head = head.stdout.decode("ascii").strip()
+            if current_head != expected:
+                reasons.append("checked-out HEAD is not the expected base")
+        status = _git(repository, "status", "--porcelain=v1", "--untracked-files=normal", check=False)
+        if status.returncode != 0:
+            reasons.append("cannot verify that the checkout is clean")
+        elif status.stdout.strip():
+            reasons.append("checked-out worktree has uncommitted changes")
     return {
         "schema_version": 1,
         "shadow": shadow,
@@ -321,6 +334,17 @@ def promote(
         raise PromotionError("promotion compare-and-swap failed; main changed after planning") from exc
     plan["mutation"] = "updated-main-ref"
     plan["current_main"] = plan["candidate_commit"]
+    if not _is_bare(repository):
+        # Advance the checkout with a fast-forward only. No history is rewritten
+        # and no remote is contacted.
+        try:
+            _git(repository, "merge", "--ff-only", plan["candidate_commit"])
+        except PromotionError as exc:
+            raise PromotionError(
+                "main ref advanced but the checkout could not fast-forward; "
+                "resolve the working tree manually"
+            ) from exc
+        plan["mutation"] = "updated-main-ref-and-fast-forwarded-checkout"
     return plan
 
 
