@@ -58,6 +58,7 @@ def test_frozen_archive_extracts_to_exactly_the_frozen_manifest(tmp_path: Path) 
         epoch_id="epoch-roundtrip", worker_id="worker-roundtrip",
         hypothesis_id="hypothesis-roundtrip",
         contract_id=policy["contract_id"], policy_id=policy["policy_id"], ref="HEAD",
+        include_dirty=True,
     )
     extracted = tmp_path / "extracted"
     extracted.mkdir()

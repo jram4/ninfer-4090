@@ -918,6 +918,7 @@ def _stage_environment(stage: Mapping[str, Any], paths: Mapping[str, Path | str]
         "NINFER_CONTRACT_ID": str(policy["contract_id"]),
         "NINFER_SOURCE_SNAPSHOT_SHA256": str(submission["source"]["snapshot_sha256"]),
         "NINFER_BUILD_KEY": build_key,
+        "NINFER_TOOLCHAIN_ID": str(policy.get("toolchain_id", "")),
         # The stage program must publish exactly these evidence names.
         "NINFER_STAGE_REQUIRED_EVIDENCE": json.dumps(list(stage["required_evidence"])),
         "NINFER_STAGE_CRITERIA": json.dumps(stage["criteria"], sort_keys=True),
