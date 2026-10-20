@@ -41,7 +41,8 @@ void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_
             frame.proposal_q, frame.current_extents, frame.frontiers, frame.anchors,
             frame.licensed_tokens, frame.licensed_counts, frame.accepted_drafts,
             dimension(execution.parameters.model.resources().public_token_count), frame.sampling,
-            {false}, execution.work, execution.device.stream);
+            {false}, execution.work, execution.device.stream,
+            frame.q0_observer_metrics.data == nullptr ? nullptr : &frame.q0_observer_metrics);
     } else {
         ops::speculative_accept_greedy_drafts(
             frame.target_tokens, frame.target_logits, frame.drafts, frame.current_extents,

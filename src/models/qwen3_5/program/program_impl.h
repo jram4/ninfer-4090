@@ -15,6 +15,7 @@
 #include "models/qwen3_5/program/storage/kv_store.h"
 #include "models/qwen3_5/program/storage/state_store.h"
 #include "models/qwen3_5/program/prefix_identity.h"
+#include "models/qwen3_5/program/speculative/q0_observer.h"
 #include "models/qwen3_5/program/planning/resource_projection.h"
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/vision.h"
@@ -366,6 +367,8 @@ struct SequenceState {
     std::array<std::array<float, qwen3_5::kMtpProposalCandidates>,
                qwen3_5::kMtpDecodeMaximumDrafts> mtp_proposal_q{};
     std::uint32_t mtp_draft_count = 0;
+    std::uint64_t mtp_round_index = 0;
+    bool mtp_initial_prefill_one_hot = false;
     bool tail_hidden_valid        = false;
     bool endpoint_valid           = false;
     RewriteCheckpoint rewrite_checkpoint;
@@ -410,6 +413,7 @@ struct RequestControl {
     detail::PhysicalResources active_resources;
     detail::PhysicalResources optional_resources;
     bool publish_continuation = true;
+    std::optional<MtpQ0RoundRecord> q0_pending_record;
 
     struct Prefill {
         PreparedPromptData prompt;
@@ -578,6 +582,8 @@ public:
     const bool vision_enabled;
     const bool use_cuda_graph;
     const bool causal_scoring;
+    bool q0_observer_enabled = false;
+    MtpQ0ObserverTraceBuffer q0_observer_trace;
     const std::size_t kv_payload_bytes;
     const std::size_t graph_allowance_bytes;
     const WorkspacePlan workspace_plan;

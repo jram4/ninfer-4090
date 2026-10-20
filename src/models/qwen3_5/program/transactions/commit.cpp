@@ -399,6 +399,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
             sequence.execution_frontier = end;
             sequence.ledger_frontier    = end + 1U;
             sequence.mtp_draft_count    = 0;
+            sequence.mtp_initial_prefill_one_hot = false;
             sequence.tail_hidden_valid  = true;
             if (sequence.ledger.size() != sequence.ledger_frontier ||
                 sequence.prefix_identity.size() != sequence.ledger_frontier ||
@@ -461,6 +462,7 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
         std::array<std::uint32_t, kMaximumConcurrency> accepted{};
         std::array<std::uint8_t, kMaximumConcurrency> terminal{};
         std::array<std::uint8_t, kMaximumConcurrency> cancelled{};
+        std::array<std::optional<MtpQ0RoundRecord>, kMaximumConcurrency> q0_records{};
         std::array<std::optional<std::uint32_t>, kMaximumConcurrency> prefix_execution_splits{};
         for (std::size_t row = 0; row < row_count; ++row) {
             const std::uint32_t lane                = ContractAccess::lane(members[row]).value;
@@ -468,6 +470,12 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
             const PendingCandidate& candidate       = requests[lane].pending;
             pending_kinds[row]                      = candidate.kind;
             const runtime::CommitDecision& decision = decisions[row];
+            if (q0_observer_enabled && speculative_backend == SpeculativeBackend::Mtp &&
+                candidate.kind == PendingKind::Speculative &&
+                !requests[lane].q0_pending_record) {
+                throw std::logic_error("MTP Q0 observer has no pending verifier record");
+            }
+            q0_records[row] = requests[lane].q0_pending_record;
             if (decision.cancelled && has_context_transaction()) {
                 throw std::logic_error(
                     "active cancellation overlaps the global context transaction");
@@ -502,6 +510,20 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
                                 failed_timing));
         timing.resume_post();
         pending_transaction_.reset();
+
+        for (std::size_t row = 0; row < row_count; ++row) {
+            if (!q0_records[row]) { continue; }
+            MtpQ0RoundRecord record = resolve_mtp_q0_round_record(
+                *q0_records[row], decisions[row].accepted_tokens, decisions[row].terminal,
+                decisions[row].cancelled);
+            q0_observer_trace.append(record);
+            requests[lanes[row]].q0_pending_record.reset();
+            if (!decisions[row].cancelled) {
+                SequenceState& sequence = active_sequence(lanes[row]);
+                sequence.mtp_initial_prefill_one_hot = false;
+                ++sequence.mtp_round_index;
+            }
+        }
 
         CommitResult out;
         out.row_count          = row_count;
@@ -571,6 +593,16 @@ DiscardResult ProgramImpl::abort_pending(PendingBatch&& pending) noexcept {
     std::array<std::uint32_t, kMaximumConcurrency> failed_lanes{};
     for (std::size_t row = 0; row < out.row_count; ++row) {
         failed_lanes[row] = ContractAccess::lane(members[row]).value;
+    }
+    if (q0_observer_enabled) {
+        for (std::size_t row = 0; row < out.row_count; ++row) {
+            const std::uint32_t lane = failed_lanes[row];
+            if (lane >= max_concurrency || !requests[lane].q0_pending_record) { continue; }
+            const MtpQ0RoundRecord record =
+                abort_mtp_q0_round_record(*requests[lane].q0_pending_record);
+            q0_observer_trace.append(record);
+            requests[lane].q0_pending_record.reset();
+        }
     }
     const bool deferred_to_fail_all = has_context_transaction();
     clear_execution_failure_lanes(

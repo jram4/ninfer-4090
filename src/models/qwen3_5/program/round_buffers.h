@@ -80,6 +80,9 @@ struct MtpDecodeEgress {
     std::array<float, kMaximumConcurrency * kMtpDecodeMaximumDrafts * kMtpProposalCandidates>
         next_proposal_q{};
     std::array<std::int32_t, kMaximumConcurrency> next_extents{};
+    // [metric,depth,row]: overlap then target support coverage. This is copied only when the
+    // Q0 observer is enabled; keeping it in the existing egress preserves Program ownership.
+    std::array<float, 2 * kMaximumConcurrency * kMtpDecodeMaximumDrafts> q0_observer_metrics{};
 };
 
 // Stable pinned/device transfer formats for one exact-B DFlash transaction. The proposal is
@@ -251,6 +254,7 @@ struct MtpDecodeState {
     Tensor next_candidate_ids;
     Tensor next_proposal_q;
     Tensor next_extents;
+    Tensor q0_observer_metrics;
     Tensor verify_ids;
     Tensor target_positions;
     Tensor target_argmax;

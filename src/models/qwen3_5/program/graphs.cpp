@@ -347,7 +347,8 @@ void ProgramImpl::prepare_graphs() {
                                              *io.mtp_decode,
                                              *mtp_host_ingress,
                                              *mtp_host_egress,
-                                             state_images->continuation_hidden_store()};
+                                             state_images->continuation_hidden_store(),
+                                             q0_observer_enabled};
         const GraphExecutionProfile code_warm = planned_profiles.front();
         prepare_representative(code_warm.min, 1);
         device.synchronize();

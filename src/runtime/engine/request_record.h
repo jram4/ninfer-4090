@@ -171,6 +171,12 @@ struct RequestRecord {
     std::optional<GenerationBudget> budget;
     std::optional<BeginSummary> admitted_begin;
     std::optional<BeginSummary> begin;
+    bool q0_identity_enabled = false;
+    bool q0_prompt_identity_valid = false;
+    bool q0_prompt_identity_exported = false;
+    bool q0_committed_identity_exported = false;
+    std::size_t q0_prompt_token_count = 0;
+    std::string q0_prompt_token_ids_sha256;
     std::vector<TokenId> generated;
     std::string content;
     std::string reasoning;

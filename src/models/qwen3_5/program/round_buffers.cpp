@@ -239,6 +239,9 @@ MtpDecodeState::MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& l
     }
     static_assert(std::is_standard_layout_v<MtpDecodeIngress>);
     static_assert(std::is_standard_layout_v<MtpDecodeEgress>);
+    static_assert(offsetof(MtpDecodeEgress, q0_observer_metrics) ==
+                  offsetof(MtpDecodeEgress, next_extents) +
+                      sizeof(std::array<std::int32_t, kMaximumConcurrency>));
     const auto batch          = static_cast<std::int32_t>(batch_capacity);
     const auto drafts         = static_cast<std::int32_t>(draft_window);
     const auto width          = drafts + 1;
@@ -303,6 +306,10 @@ MtpDecodeState::MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& l
                              DType::FP32,
                              {static_cast<std::int32_t>(kMtpProposalCandidates), drafts, batch});
     next_extents     = egress_tensor(offsetof(MtpDecodeEgress, next_extents), DType::I32, {batch});
+    q0_observer_metrics = egress_tensor(
+        offsetof(MtpDecodeEgress, q0_observer_metrics), DType::FP32,
+        {2, static_cast<std::int32_t>(kMtpDecodeMaximumDrafts),
+         static_cast<std::int32_t>(kMaximumConcurrency)});
     verify_ids       = layout.verify_ids.bind(backing);
     target_positions = layout.target_positions.bind(backing);
     target_argmax    = layout.target_argmax.bind(backing);

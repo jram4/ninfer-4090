@@ -645,6 +645,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         request.pending              = {};
         request.publish_continuation = request_plan.summary.publish_continuation;
         sequence.mtp_draft_count     = 0;
+        sequence.mtp_initial_prefill_one_hot = false;
         sequence.tail_hidden_valid   = base == prompt_tokens && sequence.tail_hidden_valid;
         sequence.ledger.swap(materialization_ledger_);
         sequence.prefix_identity.swap(materialization_identity_);
@@ -1231,6 +1232,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 throw std::logic_error("staged MTP prefill did not reach the prompt frontier");
             }
             sequence.mtp_draft_count = staged.initial_mtp_extent;
+            sequence.mtp_initial_prefill_one_hot =
+                q0_observer_enabled && staged.initial_mtp_extent != 0;
             std::copy_n(initial_drafts.begin(), staged.initial_mtp_extent,
                         sequence.mtp_drafts.begin());
             const auto public_tokens = parameters.model.resources().public_token_count;

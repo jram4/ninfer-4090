@@ -9,11 +9,13 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -74,6 +76,12 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       context_transfer_timers_{CudaEventTimer(device_in, device_in.transfer_stream),
                                CudaEventTimer(device_in, device_in.transfer_stream),
                                CudaEventTimer(device_in, device_in.transfer_stream)} {
+    // Read the diagnostic opt-in before CUDA Graph preparation fixes MTP execution topology.
+    const char* q0_observer_env = std::getenv("NINFER_Q0_OBSERVER");
+    q0_observer_enabled = speculative_backend == SpeculativeBackend::Mtp &&
+                          q0_observer_env != nullptr &&
+                          std::string_view(q0_observer_env) == "1";
+    if (q0_observer_enabled) { q0_observer_trace.enable(); }
     if (&parameters != plan.parameters || parameters.model.options() != plan.features) {
         throw std::invalid_argument("Program parameters do not match the frozen sequence plan");
     }

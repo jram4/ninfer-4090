@@ -104,6 +104,11 @@ ninfer_add_op_test(ninfer_speculative_round_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_speculative_round.cpp"
   LIBRARIES ninfer_ops)
 
+add_test(NAME ninfer_speculative_round_q0_observer_test
+  COMMAND ninfer_speculative_round_test --q0-observer-only)
+set_tests_properties(ninfer_speculative_round_q0_observer_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
 ninfer_add_test(ninfer_speculative_sampling_distribution_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_speculative_sampling_distribution.cpp")
 

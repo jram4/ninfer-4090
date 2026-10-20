@@ -148,6 +148,15 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *   all_rows_greedy_without_penalties=true promises the matching device configs and enables the
  *   raw target_tokens route. A false flag selects the general route and supports mixed rows.
  *
+ * Optional Q0 observer:
+ *   When q0_observer_metrics is non-null, writes FP32 [2,Kcap,Bcap] metrics for each live draft
+ *   depth, where Kcap>=K, Bcap>=B, and the flattened index is metric + 2*(depth + Kcap*row).
+ *   Metric 0 is probability overlap sum_x min(p(x),q(x)); metric 1 is target support coverage
+ *   sum_{x:q(x)>0} p(x). Unused depths and padded rows are zero. p is the exact normalized,
+ *   filtered target distribution used by verification (or its one-hot argmax for greedy rows),
+ *   and q is the stored sparse proposal distribution. The output is distinct from all other
+ *   arguments. A null pointer skips metric calculation and output transfer.
+ *
  * Workspace:
  *   Caller-owned transient storage reported by
  *   speculative_accept_sparse_drafts_workspace_capacity_bytes().
@@ -157,7 +166,8 @@ void speculative_accept_sparse_drafts(
     const Tensor& candidate_ids, const Tensor& proposal_q, const Tensor& current_extents,
     Tensor& round_lengths, Tensor& round_anchors, Tensor& licensed_tokens, Tensor& licensed_counts,
     Tensor& accepted_drafts, std::int32_t token_domain, const SamplingConfig* configs,
-    SpeculativeAcceptExecutionEnvelope envelope, WorkspaceArena& workspace, cudaStream_t stream);
+    SpeculativeAcceptExecutionEnvelope envelope, WorkspaceArena& workspace, cudaStream_t stream,
+    Tensor* q0_observer_metrics = nullptr);
 
 /**
  * Op: speculative_select_accepted_hidden

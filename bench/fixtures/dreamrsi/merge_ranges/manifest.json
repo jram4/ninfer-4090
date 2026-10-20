@@ -1,0 +1,126 @@
+{
+  "fixture_id": "E0004-LW01-R1-public-fixture",
+  "fixture_status": "frozen public task, repaired independent checker, and scripted harness; no model run",
+  "source_revision": "70ebb1290dc7abe246c20696a24d21f77faee8d4",
+  "scope": "One small Python coding task for a future bounded Serve diagnostic. This fixture does not qualify model quality or production behavior.",
+  "seeds": [101, 211, 307, 401, 503],
+  "task": {
+    "function": "merge_ranges(ranges)",
+    "input_contract": "Finite iterable of valid integer pairs (start, end), with start <= end; intervals are closed.",
+    "output_contract": "Fresh list of tuple pairs sorted by start; merge overlap and adjacency; preserve gaps; leave input unchanged.",
+    "dependencies": "Python standard library only",
+    "task_prompt": "task.md",
+    "system_prompt": "system_prompt.txt",
+    "starter": "starter/merge_ranges.py"
+  },
+  "checker": {
+    "implementation": "checker.py",
+    "fixed_examples": [
+      "empty",
+      "singleton",
+      "unsorted-with-gaps",
+      "overlap",
+      "adjacent",
+      "nested",
+      "negative",
+      "preserve-gap",
+      "list-input"
+    ],
+    "independent_oracle": "For each of two invocations, compare integer coverage sets, then require exact list/tuple/int shape, sorted order, disjoint nonadjacent output, in-bounds coverage, expected output for fixed cases, and unchanged input; require distinct result lists.",
+    "exhaustive_domain": {
+      "endpoints": [-2, 2],
+      "intervals": 15,
+      "maximum_input_length": 3,
+      "ordered_interval_lists": 3616
+    },
+    "fixed_plus_exhaustive_cases": 3625
+  },
+  "tool_runner": {
+    "implementation": "agent_harness.py",
+    "endpoint": "Chat Completions at explicit --base-url, path /v1/chat/completions",
+    "model": "Required explicit --model; no default or artifact selected for this fixture-only task.",
+    "tools": {
+      "read_file": {
+        "arguments": {
+          "path": "merge_ranges.py"
+        },
+        "allowlist": ["merge_ranges.py"]
+      },
+      "write_file": {
+        "arguments": {
+          "path": "merge_ranges.py",
+          "content": "UTF-8 source text, at most 65536 bytes"
+        },
+        "allowlist": ["merge_ranges.py"],
+        "write": "Atomic replacement"
+      },
+      "run_tests": {
+        "arguments": {},
+        "command": [
+          "explicit active Python interpreter",
+          "checker.py",
+          "workspace/merge_ranges.py"
+        ],
+        "timeout_seconds": 5,
+        "shell": false
+      }
+    },
+    "call_order": "Calls in each assistant response execute sequentially in array order. Unknown tools, malformed JSON, wrong keys, and disallowed paths return structured errors and each executed call consumes one of four calls.",
+    "call_budget": {
+      "maximum_executed_tool_calls": 4,
+      "overflow": "Execute up to the remaining budget in response order, do not execute overflow calls, and terminate without another completion.",
+      "after_four_calls": "If token budget remains, make one completion request with tool_choice none. If it returns tool calls, terminate without executing them."
+    },
+    "token_budget": {
+      "maximum_completion_tokens_total": 512,
+      "accounting": "Require integer usage.completion_tokens and accumulate it across responses. Each request sets max_completion_tokens to the remaining budget. Stop at the cap; reject server-reported usage above the remaining budget.",
+      "tool_output_tokens": "Tool output is not model-generated completion tokens."
+    },
+    "finish_condition": "Success requires an observed passing run_tests result that was not invalidated by a later write, plus a final assistant response with finish_reason stop and no tool calls.",
+    "request_profile": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 20,
+      "min_p": 0.0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "enable_thinking": true,
+      "preserve_thinking": false,
+      "stream": false,
+      "parallel_tool_calls": "omitted; the Serve request parser rejects false when tools are enabled",
+      "stop": "omitted",
+      "tool_choice": "auto until the four-call budget is reached, then none for one final completion"
+    }
+  },
+  "workspace": {
+    "layout": "One new seed-<seed> directory per listed seed under an explicit owner-only root.",
+    "root": "Must already exist, be a non-symlink directory, and have no group/other permission bits.",
+    "seed_directory_mode": "0700",
+    "starter_file_mode": "0600",
+    "reuse": "Refuse an existing seed directory; create a fresh workspace for each seed.",
+    "tools_write_only": "merge_ranges.py",
+    "generated_transcripts": "Not persisted by this fixture."
+  },
+  "future_model_diagnostic_freeze": {
+    "artifact": "Before a diagnostic, explicitly select and record one .ninfer artifact path and SHA-256; none is selected for this public fixture run.",
+    "model_id": "Pass the model ID explicitly and record the server-reported model ID.",
+    "tokenizer": "Use only the tokenizer associated with the explicitly selected artifact; do not pass an external tokenizer or tokenizer override.",
+    "template": "Use the selected artifact's template and default generation-prompt behavior; record exact template identity.",
+    "rendered_prompt": "Before generation, record the exact rendered input token IDs and their SHA-256 for each frozen request.",
+    "run_status": "No artifact, tokenizer/template, prompt token IDs, model, or Serve process is selected or used in this fixture-only task."
+  },
+  "execution_boundary": {
+    "no_model_or_service": true,
+    "python_tests": "Run only on fnn using the resolved explicit Python 3.11 interpreter and a unique owner-only root.",
+    "sandbox_limit": "The tool interface has path allowlists and a checker timeout, but generated Python executes as the same user and is not an OS sandbox."
+  },
+  "sha256": {
+    "task.md": "9ace6003b9a43b7fe47945fc05f36eaa43e1a8e4ebe2fc3e41a9443153f7fc44",
+    "system_prompt.txt": "d453c666dbe9c726cbad1664c83cc639cd09b82f80a275a47e51c65fe4d5d051",
+    "starter/merge_ranges.py": "7f8dbfe12d4b88a6aee9ca470e2d026c0bba3a761b011a2f76be7b8ddce40adf",
+    "checker.py": "8d5302cc42aff8b63e1cf04cea36265782717a3da7568e99d9021ef3edbd0266",
+    "agent_harness.py": "8f95f534b30d769b64d71cd9b70b1c0c276ce43c1ad431ec645e07bce03f2ae3",
+    "test_checker.py": "e20a7bc8550f312dda0476faf75a80757f5ca2ff5d19096b57ba729de81c4761",
+    "test_agent_harness.py": "93530ee9c2cc07db8f324a2bc6494311827b5123992992a6f8b1fc596175e4df"
+  }
+}

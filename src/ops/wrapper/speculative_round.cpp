@@ -2,6 +2,7 @@
 #include "ops/launcher/speculative_round.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -61,6 +62,19 @@ void require_tensor3(const Tensor& t, DType dtype, std::int32_t n0, std::int32_t
         t.ne[3] != 1) {
         throw std::invalid_argument(std::string(op) + ": invalid shape for " + name);
     }
+}
+
+bool overlaps_memory(const void* lhs_data, std::size_t lhs_bytes, const void* rhs_data,
+                     std::size_t rhs_bytes) {
+    if (lhs_bytes == 0 || rhs_bytes == 0) { return false; }
+    const auto lhs_begin = reinterpret_cast<std::uintptr_t>(lhs_data);
+    const auto rhs_begin = reinterpret_cast<std::uintptr_t>(rhs_data);
+    if (lhs_begin <= rhs_begin) { return rhs_begin - lhs_begin < lhs_bytes; }
+    return lhs_begin - rhs_begin < rhs_bytes;
+}
+
+bool overlaps(const Tensor& lhs, const Tensor& rhs) {
+    return overlaps_memory(lhs.data, lhs.bytes(), rhs.data, rhs.bytes());
 }
 
 } // namespace
@@ -181,7 +195,8 @@ void speculative_accept_sparse_drafts(
     const Tensor& candidate_ids, const Tensor& proposal_q, const Tensor& current_extents,
     Tensor& round_lengths, Tensor& round_anchors, Tensor& licensed_tokens, Tensor& licensed_counts,
     Tensor& accepted_drafts, std::int32_t token_domain, const SamplingConfig* configs,
-    SpeculativeAcceptExecutionEnvelope envelope, WorkspaceArena& workspace, cudaStream_t stream) {
+    SpeculativeAcceptExecutionEnvelope envelope, WorkspaceArena& workspace, cudaStream_t stream,
+    Tensor* q0_observer_metrics) {
     constexpr const char* op = "speculative_accept_sparse_drafts";
     if (token_domain <= 0) {
         throw std::invalid_argument("speculative_accept_sparse_drafts: token_domain must be positive");
@@ -217,15 +232,45 @@ void speculative_accept_sparse_drafts(
     if (configs == nullptr) {
         throw std::invalid_argument("speculative_accept_sparse_drafts: configs must be non-null");
     }
+    if (q0_observer_metrics != nullptr) {
+        require_dtype(*q0_observer_metrics, DType::FP32, op, "q0_observer_metrics");
+        if (q0_observer_metrics->ne[0] != 2 || q0_observer_metrics->ne[1] < k ||
+            q0_observer_metrics->ne[2] < batch || q0_observer_metrics->ne[3] != 1) {
+            throw std::invalid_argument(
+                "speculative_accept_sparse_drafts: q0_observer_metrics must be [2,Kcap>=K,Bcap>=B]");
+        }
+        const Tensor* const other_tensors[] = {
+            &target_tokens,  &logits,          &drafts,       &candidate_ids,
+            &proposal_q,     &current_extents, &round_lengths, &round_anchors,
+            &licensed_tokens, &licensed_counts, &accepted_drafts,
+        };
+        for (const Tensor* tensor : other_tensors) {
+            if (overlaps(*q0_observer_metrics, *tensor)) {
+                throw std::invalid_argument(
+                    "speculative_accept_sparse_drafts: q0_observer_metrics must not overlap other tensors");
+            }
+        }
+        if (overlaps_memory(q0_observer_metrics->data, q0_observer_metrics->bytes(), configs,
+                            static_cast<std::size_t>(batch) * sizeof(*configs))) {
+            throw std::invalid_argument(
+                "speculative_accept_sparse_drafts: q0_observer_metrics must not overlap configs");
+        }
+    }
 
     auto scratch_scope      = workspace.scope();
     const std::size_t bytes = speculative_accept_sparse_drafts_workspace_capacity_bytes(
         token_domain, envelope, k, k, batch, batch);
     const DeviceSpan scratch = bytes == 0 ? DeviceSpan{} : workspace.alloc_bytes(bytes);
+    if (q0_observer_metrics != nullptr &&
+        overlaps_memory(q0_observer_metrics->data, q0_observer_metrics->bytes(), scratch.data,
+                        scratch.bytes)) {
+        throw std::invalid_argument(
+            "speculative_accept_sparse_drafts: q0_observer_metrics must not overlap workspace");
+    }
     detail::speculative_accept_sparse_drafts_launch(
         target_tokens, logits, drafts, candidate_ids, proposal_q, current_extents, round_lengths,
         round_anchors, licensed_tokens, licensed_counts, accepted_drafts, token_domain, configs,
-        envelope.all_rows_greedy_without_penalties, scratch, stream);
+        envelope.all_rows_greedy_without_penalties, scratch, stream, q0_observer_metrics);
 }
 
 void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& selectors, Tensor& out,

@@ -1,18 +1,29 @@
 #include "core/layout.h"
 #include "models/qwen3_5/state/decoder_state.h"
+#include "models/qwen3_5/frontend/digest.h"
 #include "models/qwen3_5/program/speculative/mtp_alignment.h"
+#include "models/qwen3_5/program/speculative/q0_observer.h"
 #include "models/qwen3_5/program/round_buffers.h"
 #include "models/qwen3_5/program/vision_control.h"
 
 #include "models/qwen3_5/program/prefix_identity.h"
 #include "models/qwen3_5/program/planning/rebuild_work.h"
+#include "runtime/engine/q0_observer_sink.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
+#include <memory>
+#include <optional>
 #include <string_view>
 #include <vector>
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 
@@ -413,6 +424,228 @@ void test_rebuild_work_prompt_frontier_boundary() {
            "continuation growth did not preserve the prompt-frontier rebuild split");
 }
 
+void test_mtp_q0_observer_trace() {
+    constexpr std::uint32_t metric_k_stride = q36::kMtpDecodeMaximumDrafts;
+    constexpr std::uint32_t metric_row = 1;
+    std::array<float, 2 * q36::kMtpDecodeMaximumDrafts * ninfer::kMaximumConcurrency> metrics{};
+    metrics[2 * (0 + metric_k_stride * metric_row)] = 0.25F;
+    metrics[2 * (0 + metric_k_stride * metric_row) + 1] = 0.75F;
+    metrics[2 * (1 + metric_k_stride * metric_row)] = 0.125F;
+    metrics[2 * (1 + metric_k_stride * metric_row) + 1] = 0.5F;
+
+    const q36::MtpQ0RoundRecord record = q36::make_mtp_q0_round_record(
+        6, metric_row, 9, 321, 2, 3, 2, true, metrics.data(), metric_k_stride);
+    expect(record.lane == 6 && record.round_index == 9 && record.base_frontier == 321 &&
+               record.current_extent == 2 && record.verifier_licensed_count == 3 &&
+               record.verifier_accepted_drafts == 2 && record.initial_prefill_one_hot &&
+               !record.fallback && record.depths[0].overlap == 0.25F &&
+               record.depths[0].support_coverage == 0.75F &&
+               record.depths[1].overlap == 0.125F &&
+               record.depths[1].support_coverage == 0.5F &&
+               record.depths[2].overlap == 0.0F,
+           "MTP Q0 record retains lane/frontier/depth metrics and the initial one-hot marker");
+
+    const q36::MtpQ0RoundRecord fallback = q36::make_mtp_q0_round_record(
+        4, 0, 10, 99, 0, 1, 0, true, metrics.data(), metric_k_stride);
+    expect(fallback.fallback && !fallback.initial_prefill_one_hot &&
+               fallback.depths[0].overlap == 0.0F,
+           "MTP Q0 fallback record has no live proposal metrics");
+
+    const q36::MtpQ0RoundRecord partial_commit =
+        q36::resolve_mtp_q0_round_record(record, 1, true, false);
+    const q36::MtpQ0RoundRecord cancelled =
+        q36::resolve_mtp_q0_round_record(record, 0, true, true);
+    const q36::MtpQ0RoundRecord aborted = q36::abort_mtp_q0_round_record(record);
+    expect(partial_commit.verifier_licensed_count == 3 &&
+               partial_commit.engine_committed_count == 1 && partial_commit.engine_terminal &&
+               !partial_commit.engine_cancelled && !partial_commit.aborted &&
+               cancelled.engine_committed_count == 0 && cancelled.engine_terminal &&
+               cancelled.engine_cancelled && !cancelled.aborted && aborted.aborted &&
+               aborted.engine_committed_count == 0 && !aborted.engine_terminal &&
+               !aborted.engine_cancelled,
+           "MTP Q0 trace separates verifier licensing from Engine commit, cancel, and abort");
+
+    q36::MtpQ0ObserverTraceBuffer buffer;
+    expect(!buffer.snapshot().enabled && buffer.snapshot().rounds.empty(),
+           "MTP Q0 trace is disabled before opt-in");
+    buffer.enable();
+    buffer.append(record);
+    for (std::size_t i = 1; i < q36::kMtpQ0ObserverMaximumTraceRounds; ++i) {
+        buffer.append(fallback);
+    }
+    buffer.append(fallback);
+    const q36::MtpQ0ObserverTrace trace = buffer.snapshot();
+    expect(trace.enabled && trace.truncated &&
+               trace.rounds.size() == q36::kMtpQ0ObserverMaximumTraceRounds &&
+               trace.rounds.front().round_index == 9,
+           "MTP Q0 trace retrieval is bounded and reports truncation");
+    const q36::MtpQ0ObserverTrace suffix = buffer.snapshot(4095);
+    expect(suffix.rounds.size() == 1 && suffix.rounds.front().round_index == fallback.round_index,
+           "MTP Q0 trace snapshots can read only records not yet exported");
+}
+
+void test_token_id_identity_hash() {
+    const std::array<ninfer::TokenId, 3> tokens{
+        static_cast<ninfer::TokenId>(-1), 0, static_cast<ninfer::TokenId>(0x01020304)};
+    expect(ninfer::models::qwen3_5::frontend::token_ids_sha256_hex(tokens) ==
+               "5a5fe8cd8d307232c23740541f240323ea11d16c04c906a065f800b71f3a1801",
+           "token identity hashes int32 bit patterns in little-endian order");
+    expect(ninfer::models::qwen3_5::frontend::token_ids_sha256_hex(
+               std::span<const ninfer::TokenId>{}) ==
+               "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+           "empty committed sequences have the SHA-256 identity of empty bytes");
+}
+
+struct Q0ExportTestProgram {
+    Q0ExportTestProgram() { trace.enable(); }
+
+    [[nodiscard]] q36::MtpQ0ObserverTrace mtp_q0_observer_trace(std::size_t first_round) const {
+        return trace.snapshot(first_round);
+    }
+
+    q36::MtpQ0ObserverTraceBuffer trace;
+};
+
+struct Q0ExportTestRequest {
+    std::uint64_t id = 0;
+};
+
+struct Q0ExportTestResult {
+    std::vector<ninfer::TokenId> tokens;
+    std::uint64_t committed_tokens = 0;
+};
+
+Q0ExportTestResult run_q0_export_control(bool enabled, const std::string& path) {
+    Q0ExportTestProgram program;
+    std::array<std::shared_ptr<Q0ExportTestRequest>, 1> slots{};
+    std::optional<ninfer::runtime::Q0ObserverExport> exporter;
+    if (enabled) {
+        exporter.emplace(path);
+    } else {
+        exporter.emplace();
+    }
+
+    Q0ExportTestResult result;
+    slots[0] = std::make_shared<Q0ExportTestRequest>(Q0ExportTestRequest{.id = 101});
+    q36::MtpQ0RoundRecord committed;
+    committed.lane = 0;
+    committed.round_index = 4;
+    committed.current_extent = 1;
+    committed.engine_committed_count = 2;
+    result.tokens = {17, 19};
+    result.committed_tokens = 2;
+    const std::array<ninfer::TokenId, 2> prompt_tokens{5, 7};
+    exporter->append_prompt_identity(
+        101, prompt_tokens.size(),
+        ninfer::models::qwen3_5::frontend::token_ids_sha256_hex(prompt_tokens));
+    program.trace.append(committed);
+    exporter->capture(program, slots);
+    exporter->append_committed_identity(
+        101, result.tokens.size(),
+        ninfer::models::qwen3_5::frontend::token_ids_sha256_hex(result.tokens));
+
+    slots[0] = std::make_shared<Q0ExportTestRequest>(Q0ExportTestRequest{.id = 102});
+    q36::MtpQ0RoundRecord cancelled = committed;
+    cancelled.round_index = 0;
+    cancelled.engine_committed_count = 0;
+    cancelled.engine_terminal = true;
+    cancelled.engine_cancelled = true;
+    program.trace.append(cancelled);
+    exporter->capture(program, slots);
+
+    slots[0] = std::make_shared<Q0ExportTestRequest>(Q0ExportTestRequest{.id = 103});
+    q36::MtpQ0RoundRecord aborted = committed;
+    aborted.round_index = 0;
+    aborted.engine_committed_count = 0;
+    aborted.aborted = true;
+    program.trace.append(aborted);
+    exporter->capture(program, slots);
+    exporter->finish();
+    return result;
+}
+
+void test_q0_observer_engine_export() {
+    const std::filesystem::path directory = std::filesystem::temp_directory_path();
+    const std::string stem = "ninfer-q0-observer-" + std::to_string(::getpid());
+    const std::string disabled_path = (directory / (stem + "-disabled.jsonl")).string();
+    const std::string output_path = (directory / (stem + "-export.jsonl")).string();
+    const std::string truncated_path = (directory / (stem + "-truncated.jsonl")).string();
+    const std::string identity_only_path = (directory / (stem + "-identity-only.jsonl")).string();
+    (void)::unlink(disabled_path.c_str());
+    (void)::unlink(output_path.c_str());
+    (void)::unlink(truncated_path.c_str());
+    (void)::unlink(identity_only_path.c_str());
+
+    const Q0ExportTestResult disabled = run_q0_export_control(false, disabled_path);
+    const Q0ExportTestResult enabled = run_q0_export_control(true, output_path);
+    expect(disabled.tokens == enabled.tokens &&
+               disabled.committed_tokens == enabled.committed_tokens,
+           "Q0 Engine export leaves synthetic committed tokens and counters unchanged");
+    expect(::access(disabled_path.c_str(), F_OK) != 0,
+           "disabled Q0 observer export creates no output file");
+
+    struct stat output_status {};
+    expect(::stat(output_path.c_str(), &output_status) == 0 &&
+               (output_status.st_mode & 0777) == 0600,
+           "Q0 observer output is owner-only");
+    std::ifstream output_file(output_path);
+    const std::string output((std::istreambuf_iterator<char>(output_file)),
+                             std::istreambuf_iterator<char>());
+    expect(output.find("\"generation_id\":\"101\"") != std::string::npos &&
+               output.find("\"generation_id\":\"102\"") != std::string::npos &&
+               output.find("\"generation_id\":\"103\"") != std::string::npos &&
+               output.find("\"engine_cancelled\":true") != std::string::npos &&
+               output.find("\"aborted\":true") != std::string::npos &&
+               output.find("\"type\":\"prompt_identity\",\"generation_id\":\"101\","
+                           "\"token_count\":2") != std::string::npos &&
+               output.find("\"type\":\"committed_identity\",\"generation_id\":\"101\","
+                           "\"token_count\":2") != std::string::npos &&
+               output.find("\"records\":3,\"truncated\":false") != std::string::npos,
+           "Engine export binds token identities and Q0 rows across lane reuse");
+
+    ninfer::runtime::Q0ObserverExport identity_only(identity_only_path, false);
+    identity_only.append_prompt_identity(201, 1, "0123456789abcdef");
+    identity_only.append_committed_identity(201, 0, "fedcba9876543210");
+    identity_only.finish();
+    struct stat identity_status {};
+    expect(::stat(identity_only_path.c_str(), &identity_status) == 0 &&
+               (identity_status.st_mode & 0777) == 0600,
+           "observer-off identity sidecar is owner-only");
+    std::ifstream identity_file(identity_only_path);
+    const std::string identity_output((std::istreambuf_iterator<char>(identity_file)),
+                                      std::istreambuf_iterator<char>());
+    expect(identity_output.find("\"capture_rounds\":false") != std::string::npos &&
+               identity_output.find("\"type\":\"prompt_identity\"") != std::string::npos &&
+               identity_output.find("\"type\":\"committed_identity\"") != std::string::npos &&
+               identity_output.find("\"records\":0,\"truncated\":false") !=
+                   std::string::npos,
+           "observer-off sidecar records identities without Q0 rounds");
+
+    Q0ExportTestProgram program;
+    std::array<std::shared_ptr<Q0ExportTestRequest>, 1> slots{
+        std::make_shared<Q0ExportTestRequest>(Q0ExportTestRequest{.id = 104})};
+    ninfer::runtime::Q0ObserverExport exporter(truncated_path);
+    q36::MtpQ0RoundRecord record;
+    record.lane = 0;
+    record.current_extent = 1;
+    for (std::size_t i = 0; i < q36::kMtpQ0ObserverMaximumTraceRounds; ++i) {
+        program.trace.append(record);
+    }
+    exporter.capture(program, slots);
+    program.trace.append(record);
+    exporter.capture(program, slots);
+    exporter.finish();
+    std::ifstream truncated_file(truncated_path);
+    const std::string truncated((std::istreambuf_iterator<char>(truncated_file)),
+                                std::istreambuf_iterator<char>());
+    expect(truncated.find("\"records\":4096,\"truncated\":true") != std::string::npos,
+           "Q0 Engine export caps rows at 4096 and reports source truncation");
+
+    (void)::unlink(output_path.c_str());
+    (void)::unlink(truncated_path.c_str());
+    (void)::unlink(identity_only_path.c_str());
+}
+
 } // namespace
 
 int main() {
@@ -422,6 +655,9 @@ int main() {
     test_vision_control();
     test_prefix_identity();
     test_rebuild_work_prompt_frontier_boundary();
+    test_mtp_q0_observer_trace();
+    test_token_id_identity_hash();
+    test_q0_observer_engine_export();
     if (failures != 0) {
         std::cerr << failures << " Qwen3.6 runtime mechanism checks failed\n";
         return 1;

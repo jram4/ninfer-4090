@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace ninfer::models::qwen3_5::frontend {
 namespace {
@@ -129,6 +130,25 @@ std::string sha256_hex(const Sha256Digest& digest) {
         result[2 * i + 1] = hex[digest[i] & 0x0fU];
     }
     return result;
+}
+
+std::string token_ids_sha256_hex(std::span<const TokenId> token_ids) {
+    if (token_ids.size() > std::numeric_limits<std::size_t>::max() / sizeof(TokenId)) {
+        throw std::invalid_argument("token sequence is too large to fingerprint");
+    }
+    std::vector<std::uint8_t> serialized(token_ids.size() * sizeof(TokenId));
+    for (std::size_t index = 0; index < token_ids.size(); ++index) {
+        const std::uint32_t bits = static_cast<std::uint32_t>(token_ids[index]);
+        for (std::size_t byte = 0; byte < sizeof(TokenId); ++byte) {
+            serialized[index * sizeof(TokenId) + byte] =
+                static_cast<std::uint8_t>(bits >> (byte * 8U));
+        }
+    }
+    if (serialized.empty()) {
+        constexpr std::uint8_t empty_input = 0;
+        return sha256_hex(sha256(std::span<const std::uint8_t>(&empty_input, 0)));
+    }
+    return sha256_hex(sha256(serialized));
 }
 
 } // namespace ninfer::models::qwen3_5::frontend

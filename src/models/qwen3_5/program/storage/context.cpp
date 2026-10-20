@@ -245,6 +245,8 @@ void ProgramImpl::retire_continuation_slot(std::uint32_t index) noexcept {
     sequence.mtp_kv_valid            = 0;
     sequence.dflash_context_frontier = 0;
     sequence.mtp_draft_count         = 0;
+    sequence.mtp_round_index         = 0;
+    sequence.mtp_initial_prefill_one_hot = false;
     sequence.tail_hidden_valid       = false;
     sequence.endpoint_valid          = false;
     sequence.rewrite_checkpoint      = {};
@@ -1014,6 +1016,7 @@ bool ProgramImpl::clear_lane_strict(SequenceState& sequence, RequestControl& req
     request.prefill.reset();
     request.lifecycle            = Lifecycle::Empty;
     request.pending              = {};
+    request.q0_pending_record.reset();
     request.active_resources     = {};
     request.optional_resources   = {};
     request.publish_continuation = true;
@@ -1021,6 +1024,14 @@ bool ProgramImpl::clear_lane_strict(SequenceState& sequence, RequestControl& req
 }
 
 void ProgramImpl::clear_execution_failure_lanes(std::span<const std::uint32_t> lanes) noexcept {
+    if (q0_observer_enabled) {
+        for (const std::uint32_t lane : lanes) {
+            if (lane >= max_concurrency || !requests[lane].q0_pending_record) { continue; }
+            q0_observer_trace.append(
+                abort_mtp_q0_round_record(*requests[lane].q0_pending_record));
+            requests[lane].q0_pending_record.reset();
+        }
+    }
     // A concurrent resource transaction may pin or inspect these active owners. Engine-wide
     // cleanup aborts that transaction before releasing lanes, preserving the only safe order.
     if (has_context_transaction()) { return; }
@@ -1038,6 +1049,7 @@ void ProgramImpl::clear_lane_best_effort(SequenceState& sequence,
     request.prefill.reset();
     request.lifecycle            = Lifecycle::Empty;
     request.pending              = {};
+    request.q0_pending_record.reset();
     request.active_resources     = {};
     request.optional_resources   = {};
     request.publish_continuation = true;

@@ -143,6 +143,9 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                                      .current_extents         = current_extents,
                                      .candidate_ids           = candidate_ids,
                                      .proposal_q              = proposal_q,
+                                     .q0_observer_metrics = state.q0_observer_enabled
+                                                                 ? frame.q0_observer_metrics
+                                                                 : Tensor{},
                                      .frontiers               = frontiers,
                                      .anchors                 = anchors,
                                      .licensed_tokens         = licensed_tokens,
@@ -207,9 +210,12 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
             }
         }
 
-        CUDA_CHECK(cudaMemcpyAsync(&state.host_egress, frame.egress.data,
-                                   sizeof(qwen3_5::MtpDecodeEgress), cudaMemcpyDeviceToHost,
-                                   state.execution.device.stream));
+        const std::size_t egress_copy_bytes =
+            state.q0_observer_enabled
+                ? sizeof(qwen3_5::MtpDecodeEgress)
+                : offsetof(qwen3_5::MtpDecodeEgress, q0_observer_metrics);
+        CUDA_CHECK(cudaMemcpyAsync(&state.host_egress, frame.egress.data, egress_copy_bytes,
+                                   cudaMemcpyDeviceToHost, state.execution.device.stream));
     };
 }
 

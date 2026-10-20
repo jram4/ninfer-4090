@@ -1507,6 +1507,325 @@ int generated_mtp_q_sparse_rejection_case() {
     failures += scratch.verify_guards("generated-q sparse workspace");
     return failures;
 }
+
+int sparse_q0_observer_case(int token_domain, int physical_rows, bool raw_greedy) {
+    constexpr int k = 4;
+    constexpr int columns = k + 1;
+    constexpr int batch = 3;
+    constexpr int candidate_count = ops::kSamplingCandidateCapacity;
+    constexpr int metric_k_stride = k + 2;
+    constexpr int metric_batch_capacity = batch + 1;
+    const auto logit_index = [&](int row, int column, int token) {
+        return (static_cast<std::size_t>(row) * columns + column) * physical_rows + token;
+    };
+    const auto candidate_index = [&](int row, int depth, int candidate) {
+        return (static_cast<std::size_t>(row) * k + depth) * candidate_count + candidate;
+    };
+    const auto base_token = [&](int row, int column) {
+        return token_domain <= 256 ? (row * 11 + column * 5) % (token_domain - 24)
+                                   : 100 + row * 100 + column * 30;
+    };
+
+    std::vector<std::uint16_t> logits(static_cast<std::size_t>(physical_rows) * columns * batch,
+                                      f32_to_bf16(-20.0F));
+    std::vector<int> target_tokens(columns * batch), drafts(k * batch),
+        candidate_ids(candidate_count * k * batch), extents{0, 2, 4},
+        initial_lengths{2048, 4096, 8192}, initial_anchors{7, 8, 9};
+    std::vector<float> proposal_q(candidate_ids.size(), 0.0F);
+    std::vector<int> token_counts(static_cast<std::size_t>(batch) * token_domain, 0);
+    std::vector<ops::SamplingConfig> configs(batch);
+
+    for (int row = 0; row < batch; ++row) {
+        for (int column = 0; column < columns; ++column) {
+            const int base = base_token(row, column);
+            target_tokens[row * columns + column] = base;
+            for (int rank = 0; rank < 20; ++rank) {
+                logits[logit_index(row, column, base + rank)] =
+                    f32_to_bf16(4.0F - 0.2F * static_cast<float>(rank));
+            }
+        }
+        for (int depth = 0; depth < k; ++depth) {
+            const int base = base_token(row, depth);
+            for (int candidate = 0; candidate < candidate_count; ++candidate) {
+                const int token = candidate < 12
+                                      ? base + candidate
+                                      : (token_domain <= 256 ? base + candidate
+                                                             : base + 20 + candidate - 12);
+                const std::size_t at = candidate_index(row, depth, candidate);
+                candidate_ids[at] = token;
+                if (candidate < 12) {
+                    proposal_q[at] = candidate == 5 ? 0.7F : 0.3F / 11.0F;
+                }
+            }
+            drafts[row * k + depth] = base + 5;
+        }
+    }
+
+    if (raw_greedy) {
+        for (int row = 0; row < batch; ++row) {
+            configs[row].temperature = 0.0F;
+            configs[row].seed = 17 + static_cast<unsigned long long>(row);
+        }
+    } else {
+        configs[0].temperature = 0.73F;
+        configs[0].top_k = 20;
+        configs[0].top_p = 1.0F;
+        configs[0].seed = 11;
+        configs[1].temperature = 0.0F;
+        configs[1].presence_penalty = 0.5F;
+        configs[1].frequency_penalty = 0.1F;
+        configs[1].seed = 12;
+        configs[2].temperature = 0.95F;
+        configs[2].top_k = 17;
+        configs[2].top_p = 0.8F;
+        configs[2].min_p = 0.01F;
+        configs[2].seed = 13;
+        for (int token = base_token(1, 0); token < base_token(1, 0) + 10; ++token) {
+            token_counts[static_cast<std::size_t>(token_domain) + token] = 1;
+        }
+    }
+
+    const auto proposal_probability = [&](int row, int depth, int token) {
+        for (int candidate = 0; candidate < candidate_count; ++candidate) {
+            const std::size_t at = candidate_index(row, depth, candidate);
+            if (candidate_ids[at] == token) { return static_cast<double>(proposal_q[at]); }
+        }
+        return 0.0;
+    };
+    const auto q0_oracle = [&](int row, int depth) {
+        struct Ranked {
+            double score;
+            int token;
+        };
+        const auto adjusted = [&](int token) {
+            double score = bf16_to_f32(logits[logit_index(row, depth, token)]);
+            int count = token_counts[static_cast<std::size_t>(row) * token_domain + token];
+            for (int prior = 0; prior < depth; ++prior) {
+                if (drafts[row * k + prior] == token) { ++count; }
+            }
+            if (count > 0) { score -= configs[row].presence_penalty; }
+            score -= static_cast<double>(configs[row].frequency_penalty) * count;
+            return score;
+        };
+        const auto better = [](const Ranked& left, const Ranked& right) {
+            return left.score > right.score ||
+                   (left.score == right.score && left.token < right.token);
+        };
+
+        if (!(configs[row].temperature > 0.0F)) {
+            Ranked best{-std::numeric_limits<double>::infinity(), 0};
+            for (int token = 0; token < token_domain; ++token) {
+                const Ranked candidate{adjusted(token), token};
+                if (better(candidate, best)) { best = candidate; }
+            }
+            const double q = proposal_probability(row, depth, best.token);
+            return std::pair<double, double>{std::min(1.0, q), q > 0.0 ? 1.0 : 0.0};
+        }
+
+        const int cap = std::min(token_domain, configs[row].top_k > 0
+                                                   ? std::min(configs[row].top_k, candidate_count)
+                                                   : candidate_count);
+        std::vector<Ranked> ranked(static_cast<std::size_t>(token_domain));
+        for (int token = 0; token < token_domain; ++token) {
+            ranked[static_cast<std::size_t>(token)] = Ranked{adjusted(token), token};
+        }
+        std::partial_sort(ranked.begin(), ranked.begin() + cap, ranked.end(), better);
+        ranked.resize(static_cast<std::size_t>(cap));
+        std::vector<double> weights(static_cast<std::size_t>(cap));
+        const double inverse_temperature = 1.0 / configs[row].temperature;
+        const double maximum = ranked.front().score * inverse_temperature;
+        double total = 0.0;
+        for (int item = 0; item < cap; ++item) {
+            weights[static_cast<std::size_t>(item)] =
+                std::exp(ranked[static_cast<std::size_t>(item)].score * inverse_temperature -
+                         maximum);
+            total += weights[static_cast<std::size_t>(item)];
+        }
+        const double min_p_threshold = configs[row].min_p > 0.0F
+                                           ? configs[row].min_p * weights.front()
+                                           : -1.0;
+        const bool top_p_active = configs[row].top_p < 1.0F;
+        const double top_p_target = configs[row].top_p * total;
+        double cumulative = 0.0;
+        int support = 0;
+        for (int item = 0; item < cap; ++item) {
+            if (min_p_threshold >= 0.0 &&
+                weights[static_cast<std::size_t>(item)] < min_p_threshold) {
+                break;
+            }
+            cumulative += weights[static_cast<std::size_t>(item)];
+            support = item + 1;
+            if (top_p_active && cumulative >= top_p_target) { break; }
+        }
+        support = std::max(1, support);
+        double support_sum = 0.0;
+        for (int item = 0; item < support; ++item) {
+            support_sum += weights[static_cast<std::size_t>(item)];
+        }
+        double overlap = 0.0;
+        double coverage = 0.0;
+        for (int item = 0; item < support; ++item) {
+            const double p = weights[static_cast<std::size_t>(item)] / support_sum;
+            const double q = proposal_probability(row, depth,
+                                                  ranked[static_cast<std::size_t>(item)].token);
+            if (q > 0.0) { coverage += p; }
+            overlap += std::min(p, q);
+        }
+        return std::pair<double, double>{overlap, coverage};
+    };
+
+    DeviceBuffer d_target_tokens = to_device(target_tokens);
+    DeviceBuffer d_logits = to_device(logits);
+    DeviceBuffer d_drafts = to_device(drafts);
+    DeviceBuffer d_candidate_ids = to_device(candidate_ids);
+    DeviceBuffer d_proposal_q = to_device(proposal_q);
+    DeviceBuffer d_extents = to_device(extents);
+    DeviceBuffer d_counts = to_device(token_counts);
+    for (int row = 0; row < batch; ++row) {
+        configs[row].token_counts = static_cast<int*>(d_counts.p) +
+                                   static_cast<std::size_t>(row) * token_domain;
+    }
+    DeviceBuffer d_configs = to_device(configs);
+
+    struct Output {
+        std::vector<int> tokens;
+        std::vector<int> counts;
+        std::vector<int> accepted;
+        std::vector<int> lengths;
+        std::vector<int> anchors;
+        std::vector<float> metrics;
+    };
+    const auto run = [&](bool observe, bool graph) {
+        GuardedDeviceBuffer d_lengths(batch * sizeof(int));
+        GuardedDeviceBuffer d_anchors(batch * sizeof(int));
+        GuardedDeviceBuffer d_tokens(columns * batch * sizeof(int));
+        GuardedDeviceBuffer d_counts_out(batch * sizeof(int));
+        GuardedDeviceBuffer d_accepted(batch * sizeof(int));
+        GuardedDeviceBuffer d_metrics(2 * metric_k_stride * metric_batch_capacity * sizeof(float));
+        initialize(d_lengths, initial_lengths);
+        initialize(d_anchors, initial_anchors);
+        d_tokens.fill(0xcd);
+        d_counts_out.fill(0xef);
+        d_accepted.fill(0xab);
+        d_metrics.fill(0x5a);
+
+        Tensor target_tensor(d_target_tokens.p, DType::I32, {columns, batch});
+        Tensor logits_tensor(d_logits.p, DType::BF16, {physical_rows, columns, batch});
+        Tensor drafts_tensor(d_drafts.p, DType::I32, {k, batch});
+        Tensor candidates_tensor(d_candidate_ids.p, DType::I32,
+                                 {candidate_count, k, batch});
+        Tensor q_tensor(d_proposal_q.p, DType::FP32, {candidate_count, k, batch});
+        Tensor extents_tensor(d_extents.p, DType::I32, {batch});
+        Tensor lengths_tensor(d_lengths.data(), DType::I32, {batch});
+        Tensor anchors_tensor(d_anchors.data(), DType::I32, {batch});
+        Tensor licensed_tensor(d_tokens.data(), DType::I32, {columns, batch});
+        Tensor licensed_counts_tensor(d_counts_out.data(), DType::I32, {batch});
+        Tensor accepted_tensor(d_accepted.data(), DType::I32, {batch});
+        Tensor metrics_tensor(d_metrics.data(), DType::FP32,
+                              {2, metric_k_stride, metric_batch_capacity});
+        const auto envelope = ops::SpeculativeAcceptExecutionEnvelope{
+            .all_rows_greedy_without_penalties = raw_greedy};
+        const std::size_t scratch_bytes = ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
+            token_domain, envelope, k, k, batch, batch);
+        GuardedDeviceBuffer scratch(std::max<std::size_t>(scratch_bytes, 1));
+        WorkspaceArena workspace(DeviceSpan{scratch.data(), scratch.bytes()});
+        const auto launch = [&](cudaStream_t stream) {
+            ops::speculative_accept_sparse_drafts(
+                target_tensor, logits_tensor, drafts_tensor, candidates_tensor, q_tensor,
+                extents_tensor, lengths_tensor, anchors_tensor, licensed_tensor,
+                licensed_counts_tensor, accepted_tensor, token_domain,
+                static_cast<const ops::SamplingConfig*>(d_configs.p), envelope, workspace, stream,
+                observe ? &metrics_tensor : nullptr);
+        };
+        cudaStream_t stream = nullptr;
+        if (graph) {
+            cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
+                       "q0 observer graph stream");
+            DecodeGraphDefinition definition;
+            DecodeGraphExecutable executable;
+            definition.capture(stream, [&] { launch(stream); });
+            executable.instantiate(definition);
+            executable.launch(stream);
+            cuda_synchronize(stream);
+        } else {
+            launch(nullptr);
+            cuda_synchronize();
+        }
+
+        Output result{
+            .tokens = read<int>(d_tokens, columns * batch),
+            .counts = read<int>(d_counts_out, batch),
+            .accepted = read<int>(d_accepted, batch),
+            .lengths = read<int>(d_lengths, batch),
+            .anchors = read<int>(d_anchors, batch),
+        };
+        if (observe) { result.metrics = read<float>(d_metrics, 2 * metric_k_stride * metric_batch_capacity); }
+        int guard_failures = d_lengths.verify_guards("q0 observer lengths") +
+                             d_anchors.verify_guards("q0 observer anchors") +
+                             d_tokens.verify_guards("q0 observer tokens") +
+                             d_counts_out.verify_guards("q0 observer counts") +
+                             d_accepted.verify_guards("q0 observer accepted") +
+                             d_metrics.verify_guards("q0 observer metrics") +
+                             scratch.verify_guards("q0 observer workspace");
+        if (guard_failures != 0) { throw std::runtime_error("q0 observer output guard failure"); }
+        if (stream != nullptr) {
+            cuda_check(cudaStreamDestroy(stream), "destroy q0 observer graph stream");
+        }
+        return result;
+    };
+
+    const Output disabled = run(false, false);
+    const Output enabled = run(true, false);
+    const Output enabled_graph = run(true, true);
+    int failures = 0;
+    failures += verify_exact("q0 observer tokens unchanged",
+                             enabled.tokens, disabled.tokens);
+    failures += verify_exact("q0 observer licensed counts unchanged",
+                             enabled.counts, disabled.counts);
+    failures += verify_exact("q0 observer accepted drafts unchanged",
+                             enabled.accepted, disabled.accepted);
+    failures += verify_exact("q0 observer provisional lengths unchanged",
+                             enabled.lengths, disabled.lengths);
+    failures += verify_exact("q0 observer provisional anchors unchanged",
+                             enabled.anchors, disabled.anchors);
+    failures += verify_exact("q0 observer graph tokens unchanged", enabled_graph.tokens,
+                             enabled.tokens);
+    failures += verify_exact("q0 observer graph licensed counts unchanged", enabled_graph.counts,
+                             enabled.counts);
+    failures += verify_exact("q0 observer graph accepted drafts unchanged",
+                             enabled_graph.accepted, enabled.accepted);
+    failures += verify_exact("q0 observer graph metrics unchanged", enabled_graph.metrics,
+                             enabled.metrics);
+    for (int row = 0; row < metric_batch_capacity; ++row) {
+        for (int depth = 0; depth < metric_k_stride; ++depth) {
+            const std::size_t at = static_cast<std::size_t>(2 * (depth + metric_k_stride * row));
+            if (row >= batch || depth >= extents[row]) {
+                if (enabled.metrics[at] != 0.0F || enabled.metrics[at + 1] != 0.0F) {
+                    std::cerr << "q0 observer wrote a padded or non-live depth\n";
+                    ++failures;
+                }
+                continue;
+            }
+            const auto expected = q0_oracle(row, depth);
+            if (!raw_greedy && row == 0 && depth == 0 && expected.second >= 0.99999) {
+                std::cerr << "q0 observer oracle case lost target mass outside proposal support\n";
+                ++failures;
+            }
+            for (int metric = 0; metric < 2; ++metric) {
+                const double want = metric == 0 ? expected.first : expected.second;
+                const double got = enabled.metrics[at + static_cast<std::size_t>(metric)];
+                if (std::abs(got - want) > 5.0e-5) {
+                    std::cerr << "q0 observer metric mismatch: domain=" << token_domain
+                              << " raw=" << raw_greedy << " row=" << row
+                              << " depth=" << depth << " metric=" << metric
+                              << " got=" << got << " expected=" << want << '\n';
+                    ++failures;
+                }
+            }
+        }
+    }
+    return failures;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1515,9 +1834,18 @@ int main(int argc, char** argv) {
         return 77;
     }
 
-    if (argc > 2 || (argc == 2 && std::string_view(argv[1]) != "--transforms-only")) {
-        std::cerr << "usage: ninfer_speculative_round_test [--transforms-only]\n";
+    if (argc > 2 ||
+        (argc == 2 && std::string_view(argv[1]) != "--transforms-only" &&
+         std::string_view(argv[1]) != "--q0-observer-only")) {
+        std::cerr << "usage: ninfer_speculative_round_test [--transforms-only|--q0-observer-only]\n";
         return 2;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--q0-observer-only") {
+        int q0_failures = sparse_q0_observer_case(64, 64, false);
+        q0_failures += sparse_q0_observer_case(kSparseTokenDomain, kSparsePhysicalRows, false);
+        q0_failures += sparse_q0_observer_case(64, 64, true);
+        std::cout << (q0_failures == 0 ? "PASS" : "FAIL") << " Q0 observer\n";
+        return q0_failures == 0 ? 0 : 1;
     }
     int failures = transforms_conformance();
     if (argc == 2) {
@@ -1577,6 +1905,9 @@ int main(int argc, char** argv) {
     failures += SparseAcceptSuite(1, 1).sparse_greedy_direct_case(0, true, true);
     failures += sparse_small_width20_greedy_logits_case();
     failures += generated_mtp_q_sparse_rejection_case();
+    failures += sparse_q0_observer_case(64, 64, false);
+    failures += sparse_q0_observer_case(kSparseTokenDomain, kSparsePhysicalRows, false);
+    failures += sparse_q0_observer_case(64, 64, true);
 
     for (int k : {1, 7, 15}) {
         SparseAcceptSuite suite(k, 8);

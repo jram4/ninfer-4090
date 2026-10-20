@@ -508,7 +508,8 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                                   *io.mtp_decode,
                                                   *mtp_host_ingress,
                                                   *mtp_host_egress,
-                                                  state_images->continuation_hidden_store()};
+                                                  state_images->continuation_hidden_store(),
+                                                  q0_observer_enabled};
 
         mark_workspace_usage(workspace_plan.mtp_round);
         execution::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
@@ -545,6 +546,16 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             validate_licensed_tokens(row_tokens);
             const std::uint32_t pcur =
                 static_cast<std::uint32_t>(mtp_host_ingress->current_extents[row]);
+            if (q0_observer_enabled) {
+                if (request.q0_pending_record) {
+                    throw std::logic_error("MTP Q0 observer has an unresolved prior round");
+                }
+                request.q0_pending_record = make_mtp_q0_round_record(
+                    lanes[row], static_cast<std::uint32_t>(row), sequence.mtp_round_index,
+                    base_E, pcur, static_cast<std::uint32_t>(count_i),
+                    static_cast<std::uint32_t>(accepted_i), sequence.mtp_initial_prefill_one_hot,
+                    mtp_host_egress->q0_observer_metrics.data(), kMtpDecodeMaximumDrafts);
+            }
             if (pcur == 0) {
                 request.speculative_stats.fallback_steps += 1;
             } else {

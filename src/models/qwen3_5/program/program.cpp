@@ -472,6 +472,12 @@ MemorySummary Program::memory_summary() const noexcept { return impl_->memory_su
 
 void Program::reset_memory_peaks() noexcept { impl_->reset_memory_peaks(); }
 
+bool Program::mtp_q0_observer_enabled() const noexcept { return impl_->q0_observer_enabled; }
+
+MtpQ0ObserverTrace Program::mtp_q0_observer_trace(std::size_t first_round) const {
+    return impl_->q0_observer_trace.snapshot(first_round);
+}
+
 SequencePlanner make_sequence_planner(const execution::Parameters& parameters,
                                       DeviceContext& device, const EngineOptions& options) {
     return SequencePlanner(detail::make_sequence_planner_impl(parameters, device, options));

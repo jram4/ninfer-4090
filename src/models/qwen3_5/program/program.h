@@ -4,6 +4,7 @@
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
+#include "models/qwen3_5/program/speculative/q0_observer.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -938,6 +939,10 @@ public:
     [[nodiscard]] PhysicalUsageSnapshot physical_usage() const noexcept;
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
     void reset_memory_peaks() noexcept;
+    // Enable with NINFER_Q0_OBSERVER=1 before Program construction. Retrieve only at a
+    // quiescent point after a Program call returns; the Engine owns synchronization.
+    [[nodiscard]] bool mtp_q0_observer_enabled() const noexcept;
+    [[nodiscard]] MtpQ0ObserverTrace mtp_q0_observer_trace(std::size_t first_round = 0) const;
 
 private:
     explicit Program(std::unique_ptr<detail::ProgramImpl> impl) noexcept;

@@ -73,6 +73,7 @@ struct MtpBatchContext {
     const qwen3_5::MtpDecodeIngress& host_ingress;
     qwen3_5::MtpDecodeEgress& host_egress;
     Tensor& continuation_hidden_store;
+    bool q0_observer_enabled = false;
 };
 
 struct DFlashBatchContext {
@@ -117,6 +118,7 @@ struct TargetVerifyFrameView {
     Tensor current_extents;
     Tensor candidate_ids;
     Tensor proposal_q;
+    Tensor q0_observer_metrics;
     Tensor frontiers;
     Tensor anchors;
     Tensor licensed_tokens;

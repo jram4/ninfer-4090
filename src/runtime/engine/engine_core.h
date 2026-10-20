@@ -11,6 +11,9 @@
 #include "runtime/engine/context_cache/resource_manager.h"
 #include "runtime/engine/scheduler.h"
 #include "runtime/engine/generation_budget.h"
+#include "runtime/engine/q0_observer_sink.h"
+#include "models/qwen3_5/frontend/digest.h"
+#include "models/qwen3_5/frontend/prepared_prompt.h"
 
 #include <algorithm>
 #include <array>
@@ -19,6 +22,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <exception>
 #include <future>
@@ -73,7 +77,8 @@ public:
                      options.context_cache.max_shared_prefixes.value(),
                      options.context_cache.enabled,
                      options.context_cache.max_long_anchors_per_continuation.value_or(0),
-                     std::move(context_cost)) {
+                     std::move(context_cost)),
+          q0_observer_export_(make_q0_observer_export(*instance.program)) {
         if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
             throw std::invalid_argument("Engine core bounds are invalid");
@@ -109,6 +114,7 @@ public:
         }
         queue_cv_.notify_all();
         if (worker_.joinable()) { worker_.join(); }
+        q0_observer_export_.finish();
     }
 
     EngineCore(const EngineCore&)            = delete;
@@ -199,6 +205,23 @@ public:
 
         std::shared_ptr<Request> request;
         try {
+            const bool q0_identity_enabled = q0_observer_export_.identity_enabled();
+            std::size_t q0_prompt_token_count = 0;
+            std::string q0_prompt_token_ids_sha256;
+            bool q0_prompt_identity_valid = false;
+            if (q0_identity_enabled) {
+                try {
+                    const auto& prepared =
+                        ninfer::models::qwen3_5::PreparedPromptAccess::view(prompt);
+                    q0_prompt_token_count = prepared.token_ids.size();
+                    q0_prompt_token_ids_sha256 =
+                        ninfer::models::qwen3_5::frontend::token_ids_sha256_hex(
+                            prepared.token_ids);
+                    q0_prompt_identity_valid = true;
+                } catch (...) {
+                    // Diagnostic failure is reported by the Engine worker; generation continues.
+                }
+            }
             auto output = instance_.frontend.make_output_session(
                 prompt, options.stop, options.output, options.execution.thinking);
             const std::uint32_t capacity_output =
@@ -214,6 +237,10 @@ public:
                                                 std::move(output), prompt_summary, prepare_seconds,
                                                 std::move(options), consumer_mode, observation,
                                                 pending_deadline, submitted);
+            request->q0_identity_enabled = q0_identity_enabled;
+            request->q0_prompt_token_count = q0_prompt_token_count;
+            request->q0_prompt_token_ids_sha256 = std::move(q0_prompt_token_ids_sha256);
+            request->q0_prompt_identity_valid = q0_prompt_identity_valid;
         } catch (...) {
             release_reserved_capacity();
             throw;
@@ -268,6 +295,35 @@ public:
     }
 
 private:
+    [[nodiscard]] static Q0ObserverExport make_q0_observer_export(Program& program) {
+        if constexpr (requires(Program& candidate) {
+                          candidate.mtp_q0_observer_enabled();
+                          candidate.mtp_q0_observer_trace(std::size_t{});
+                      }) {
+            const bool capture_rounds = program.mtp_q0_observer_enabled();
+            const char* const path = capture_rounds ? std::getenv("NINFER_Q0_OBSERVER_FILE")
+                                                    : std::getenv("NINFER_Q0_IDENTITY_FILE");
+            if (capture_rounds && (path == nullptr || *path == '\0')) {
+                throw std::invalid_argument(
+                    "NINFER_Q0_OBSERVER=1 requires NINFER_Q0_OBSERVER_FILE for diagnostic output");
+            }
+            if (path == nullptr || *path == '\0') { return {}; }
+            return Q0ObserverExport(path, capture_rounds);
+        } else {
+            return {};
+        }
+    }
+
+    void capture_q0_observer_trace() noexcept {
+        // The worker calls this at Program transaction boundaries while execution_mutex_ keeps
+        // the Program quiescent and before a completed lane can be assigned to another request.
+        if constexpr (requires(Program& candidate) {
+                          candidate.mtp_q0_observer_trace(std::size_t{});
+                      }) {
+            q0_observer_export_.capture(*instance_.program, slots_);
+        }
+    }
+
     enum class HostWorkClass : std::uint8_t {
         Decode,
         Prefill,
@@ -805,7 +861,33 @@ private:
         request->base_plan.reset();
     }
 
+    void capture_request_prompt_identity(const std::shared_ptr<Request>& request) noexcept {
+        if (!request->q0_identity_enabled || request->q0_prompt_identity_exported) { return; }
+        request->q0_prompt_identity_exported = true;
+        if (!request->q0_prompt_identity_valid) {
+            q0_observer_export_.mark_incomplete();
+            return;
+        }
+        q0_observer_export_.append_prompt_identity(request->id, request->q0_prompt_token_count,
+                                                   request->q0_prompt_token_ids_sha256);
+    }
+
+    void capture_request_committed_identity(const std::shared_ptr<Request>& request) noexcept {
+        if (!request->q0_identity_enabled || request->q0_committed_identity_exported) { return; }
+        request->q0_committed_identity_exported = true;
+        try {
+            const std::string digest =
+                ninfer::models::qwen3_5::frontend::token_ids_sha256_hex(request->generated);
+            q0_observer_export_.append_committed_identity(request->id, request->generated.size(),
+                                                         digest);
+        } catch (...) {
+            q0_observer_export_.mark_incomplete();
+        }
+    }
+
     void complete_error(const std::shared_ptr<Request>& request, std::exception_ptr error) {
+        capture_request_prompt_identity(request);
+        capture_request_committed_identity(request);
         release_planning_state(request);
         request->prompt      = {};
         request->model_state = EngineRequestState::ModelFinished;
@@ -824,6 +906,8 @@ private:
     }
 
     void complete_success(const std::shared_ptr<Request>& request, FinishReason reason) {
+        capture_request_prompt_identity(request);
+        capture_request_committed_identity(request);
         HostPhaseMeasurement completion = begin_host_phase();
         double prompt_wall_seconds      = 0.0;
         double generation_wall_seconds  = 0.0;
@@ -1048,6 +1132,7 @@ private:
             (!pending.row_counts().empty() && pending.row_counts().size() != row_count) ||
             pending.tokens().size() < static_cast<std::size_t>(pending.row_stride()) * row_count) {
             const auto discarded = instance_.program->abort_pending(std::move(pending));
+            capture_q0_observer_trace();
             std::array<LaneId, kMaximumConcurrency> invalid_lanes{};
             for (std::size_t row = 0; row < row_count; ++row) {
                 invalid_lanes[row] = LaneId{lane_indices[row]};
@@ -1147,6 +1232,7 @@ private:
             const std::exception_ptr error = std::current_exception();
             rollback_generated();
             const auto discarded = instance_.program->abort_pending(std::move(pending));
+            capture_q0_observer_trace();
             if (discarded.status == ConsumeStatus::Consumed) {
                 resources_.apply_discard(std::span<const LaneId>(lanes.data(), row_count),
                                          discarded);
@@ -1164,9 +1250,11 @@ private:
                 std::move(pending), std::span<const CommitDecision>(decisions.data(), row_count),
                 CommitObservation::ReleasedRowsOnly, &program_call.failed_timing());
             program_call.finish(committed.timing);
+            capture_q0_observer_trace();
             committed_storage.emplace(std::move(committed));
             phase.resume_range();
         } catch (...) {
+            capture_q0_observer_trace();
             rollback_generated();
             if (!instance_.program->has_context_transaction()) {
                 resources_.release_failed_commit(std::span<const LaneId>(lanes.data(), row_count));
@@ -1616,6 +1704,7 @@ private:
             .started          = Clock::now(),
         };
 
+        capture_request_prompt_identity(request);
         const auto reserved = resources_.reserve_materialization(
             *instance_.program, std::move(choice), std::move(request->prompt),
             CancellationFlagView{&request->cancelled});
@@ -1923,6 +2012,7 @@ private:
             materializing_ ? materializing_->request : nullptr;
         materializing_.reset();
         instance_.program->fail_all_cleanup();
+        capture_q0_observer_trace();
         resources_.clear_after_program_cleanup();
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
             if (slots_[lane] != nullptr) {
@@ -2044,6 +2134,7 @@ private:
     const std::size_t max_outstanding_;
     const std::chrono::milliseconds pending_timeout_;
     ResourceManagement resources_;
+    Q0ObserverExport q0_observer_export_;
 
     mutable std::mutex execution_mutex_;
     mutable std::mutex queue_mutex_;
@@ -2051,6 +2142,7 @@ private:
     std::condition_variable queue_cv_;
     std::deque<std::shared_ptr<Request>> pending_;
     std::size_t outstanding_              = 0;
+    // These per-Engine IDs are never reused; exported rows copy the ID before lane retirement.
     std::uint64_t next_request_id_        = 1;
     std::uint64_t next_publication_order_ = 1;
     std::array<std::shared_ptr<Request>, kMaximumConcurrency> slots_{};
