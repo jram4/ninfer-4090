@@ -7,6 +7,7 @@ COMMANDS = {
     "submit": "submit",
     "queue": "queue",
     "promote": "promotion",
+    "policy": "policy",
     "coordinator": "coordinator",
     "transport": "transport",
     "epoch": "epochs",
@@ -17,12 +18,14 @@ COMMANDS = {
     "replay": "replay",
     "corpus": "corpus",
     "compare": "quick_eval",
+    "stage": "stage",
 }
 
 DESCRIPTIONS = {
     "submit": "freeze an immutable source snapshot for evaluation",
     "queue": "inspect or operate the local submission queue",
     "promote": "plan or perform a compare-and-swap promotion",
+    "policy": "build or inspect a trusted evaluation policy",
     "coordinator": "claim, evaluate, and finish queued submissions",
     "transport": "plan or run trusted-harness installation on the build host",
     "epoch": "manage durable manual research epochs",
@@ -32,6 +35,7 @@ DESCRIPTIONS = {
     "replay": "replay one captured request",
     "corpus": "build a session-stratified screen/holdout plan",
     "compare": "reduce a paired baseline/candidate comparison",
+    "stage": "run a trusted stage program",
 }
 
 

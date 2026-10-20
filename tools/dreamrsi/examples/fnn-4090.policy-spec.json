@@ -1,0 +1,134 @@
+{
+  "baseline_id": "baseline-sampled-k7-70ebb12",
+  "corpus_id": "corpus-screen-01",
+  "toolchain_id": "fnn-cuda13-cmake44",
+  "qualification_enabled": false,
+  "contract": {
+    "model_artifact": {
+      "path": "/home/aramirezfamily/josh/cinference-4090/models/qwen3_8_27b.ablit-wxp.ninfer",
+      "sha256": "b7c6693244cf7ab08554fff41c4f3c67695b6ec388c99eed6f12e0e71046fda8",
+      "size_bytes": 18210704128
+    },
+    "runtime": {
+      "kv_dtype": "k8v4",
+      "max_context": 188416,
+      "kv_capacity": 188416,
+      "max_concurrency": 1,
+      "speculative_backend": "mtp",
+      "draft_tokens": 7,
+      "proposal_head": "optimized",
+      "prefix_reuse": true,
+      "cuda_graph": true,
+      "prefill_chunk": 1024,
+      "preserve_thinking": true,
+      "sampling_defaults": {
+        "greedy": false,
+        "omitted_seed": "random",
+        "server_overrides": {
+          "frequency_penalty": null,
+          "min_p": null,
+          "presence_penalty": null,
+          "seed": null,
+          "temperature": null,
+          "top_k": null,
+          "top_p": null
+        },
+        "thinking": {
+          "frequency_penalty": 0.0,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "temperature": 1.0,
+          "top_k": 20,
+          "top_p": 0.949999988079071
+        },
+        "non_thinking": {
+          "frequency_penalty": 0.0,
+          "min_p": 0.0,
+          "presence_penalty": 1.5,
+          "temperature": 0.699999988079071,
+          "top_k": 20,
+          "top_p": 0.800000011920929
+        }
+      }
+    },
+    "template": {
+      "path": "/home/aramirezfamily/josh/cinference-4090/releases/sampled-mtp-20260924-70ebb12/qwen3_8.jinja",
+      "sha256": "ab3f998ebacb74ea1b4f7e5ca2755b0def835f4c47ddf3cff44bc5d4a1a1f3c5"
+    },
+    "tokenizer": {
+      "embedded_in_model_artifact_sha256": "b7c6693244cf7ab08554fff41c4f3c67695b6ec388c99eed6f12e0e71046fda8"
+    }
+  },
+  "stages": [
+    {
+      "name": "admission",
+      "argv": [
+        "/home/aramirezfamily/.local/share/uv/python/cpython-3.11-linux-x86_64-gnu/bin/python3.11",
+        "-m", "tools.dreamrsi.stage", "toolchain"
+      ],
+      "timeout_seconds": 120,
+      "required_evidence": ["toolchain_evidence"],
+      "criteria": {
+        "equals": {"status": "pass"},
+        "toolchain": {"cmake": "4.4", "cuda": "13"}
+      }
+    },
+    {
+      "name": "build",
+      "argv": ["/home/aramirezfamily/josh/cinference-4090/research/build-stage.sh"],
+      "timeout_seconds": 7200,
+      "required_evidence": ["build_evidence", "candidate_binary"],
+      "criteria": {
+        "equals": {"status": "pass"},
+        "build_identity": {
+          "flags": {"build_type": "Release", "cuda_architectures": "89"},
+          "dependencies": []
+        }
+      }
+    },
+    {
+      "name": "correctness",
+      "argv": ["/home/aramirezfamily/josh/cinference-4090/research/correctness-stage.sh"],
+      "timeout_seconds": 7200,
+      "required_evidence": ["correctness_evidence"],
+      "gates": ["semantic"],
+      "criteria": {
+        "equals": {"status": "pass", "semantic_result": "pass"}
+      }
+    },
+    {
+      "name": "smoke",
+      "argv": [
+        "/home/aramirezfamily/.local/share/uv/python/cpython-3.11-linux-x86_64-gnu/bin/python3.11",
+        "-m", "tools.dreamrsi.stage", "contract"
+      ],
+      "timeout_seconds": 1800,
+      "required_evidence": ["smoke_evidence", "contract_observation"],
+      "gates": ["task"],
+      "criteria": {
+        "equals": {"status": "pass", "task_result": "pass"}
+      }
+    },
+    {
+      "name": "screen",
+      "argv": ["/home/aramirezfamily/josh/cinference-4090/research/screen-stage.sh"],
+      "timeout_seconds": 7200,
+      "required_evidence": ["screen_evidence"],
+      "criteria": {
+        "equals": {"status": "pass"},
+        "minimum": {"independent_sessions": 8}
+      }
+    },
+    {
+      "name": "full",
+      "argv": ["/home/aramirezfamily/josh/cinference-4090/research/full-stage.sh"],
+      "timeout_seconds": 14400,
+      "required_evidence": ["full_evidence"],
+      "gates": ["holdout"],
+      "criteria": {
+        "equals": {"status": "pass", "holdout_result": "pass"},
+        "minimum": {"holdout_groups": 2}
+      }
+    }
+  ]
+}

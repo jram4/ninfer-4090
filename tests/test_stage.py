@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import unittest
+
+from tools.dreamrsi import stage
+
+
+def _environment(root: Path, *, required: list[str], stage_name: str = "admission") -> dict[str, str]:
+    values = {
+        "NINFER_REPORT_SCHEMA": "1",
+        "NINFER_SUBMISSION_ID": "s" * 64,
+        "NINFER_POLICY_ID": "p" * 64,
+        "NINFER_CONTRACT_ID": "c" * 64,
+        "NINFER_SOURCE_SNAPSHOT_SHA256": "h" * 64,
+        "NINFER_ATTEMPT_ID": "a" * 32,
+        "NINFER_STAGE": stage_name,
+        "NINFER_ATTEMPT_DIR": str(root),
+        "NINFER_STAGE_RAW_DIR": str(root / "raw"),
+        "NINFER_STAGE_EVIDENCE_PATH": str(root / "report.json"),
+        "NINFER_STAGE_REQUIRED_EVIDENCE": json.dumps(required),
+    }
+    return values
+
+
+class StageProgramTests(unittest.TestCase):
+    def test_toolchain_stage_publishes_required_evidence(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            os.environ.update(_environment(root, required=["toolchain_evidence"]))
+            try:
+                self.assertEqual(stage.main(["toolchain"]), 0)
+            finally:
+                for key in list(os.environ):
+                    if key.startswith("NINFER_"):
+                        del os.environ[key]
+            report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["schema_version"], 1)
+            self.assertEqual(report["status"], "pass")
+            self.assertIn("cmake", report["toolchain"])
+            self.assertEqual(report["evidence"]["toolchain_evidence"]["path"],
+                             os.path.join("raw", "toolchain.json"))
+
+    def test_missing_evidence_is_a_stage_failure(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            os.environ.update(_environment(root, required=["not_produced"]))
+            try:
+                self.assertEqual(stage.main(["toolchain"]), 2)
+            finally:
+                for key in list(os.environ):
+                    if key.startswith("NINFER_"):
+                        del os.environ[key]
+
+    def test_contract_stage_requires_a_serve_log(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            os.environ.update(_environment(root, required=["contract_observation"],
+                                          stage_name="smoke"))
+            try:
+                self.assertEqual(stage.main(["contract"]), 2)
+            finally:
+                for key in list(os.environ):
+                    if key.startswith("NINFER_"):
+                        del os.environ[key]
+
+    def test_contract_stage_reports_the_observed_runtime(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            log = root / "requests.jsonl"
+            log.write_text(json.dumps({
+                "event": "server_start",
+                "artifact": {"size_bytes": 100},
+                "engine": {"kv_cache": "k8v4", "max_context": 188416, "kv_capacity": 188416},
+                "environment": {"gpu_name": "NVIDIA GeForce RTX 4090"},
+                "sampling_defaults": {"greedy": False},
+            }) + "\n", encoding="utf-8")
+            environment = _environment(root, required=["contract_observation"], stage_name="smoke")
+            environment["NINFER_SERVE_LOG"] = str(log)
+            environment["NINFER_MODEL_SHA256"] = "a" * 64
+            os.environ.update(environment)
+            try:
+                self.assertEqual(stage.main(["contract"]), 0)
+            finally:
+                for key in list(os.environ):
+                    if key.startswith("NINFER_"):
+                        del os.environ[key]
+            report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+            observed = report["observed_contract"]
+            self.assertEqual(observed["runtime"]["kv_dtype"], "k8v4")
+            self.assertEqual(observed["runtime"]["max_context"], 188416)
+            self.assertEqual(observed["model_artifact"]["sha256"], "a" * 64)
+            self.assertEqual(observed["tokenizer"]["embedded_in_model_artifact_sha256"], "a" * 64)
+
+
+if __name__ == "__main__":
+    unittest.main()
