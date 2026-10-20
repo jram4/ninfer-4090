@@ -893,16 +893,49 @@ void parse_thinking(const Json& body, GenerationRequest& request, ParsePurpose p
     }
 }
 
-void parse_effort(const Json& body, GenerationRequest& request, ParsePurpose purpose) {
+bool is_supported_title_schema(const Json& format) {
+    if (!format.is_object() || format.size() != 2 || !format.contains("type") ||
+        !format.at("type").is_string() || format.at("type") != "json_schema" ||
+        !format.contains("schema")) {
+        return false;
+    }
+    const Json& schema = format.at("schema");
+    if (!schema.is_object() || schema.size() != 4 || !schema.contains("type") ||
+        !schema.at("type").is_string() || schema.at("type") != "object" ||
+        !schema.contains("properties") || !schema.at("properties").is_object() ||
+        schema.at("properties").size() != 1 || !schema.at("properties").contains("title") ||
+        !schema.at("properties").at("title").is_object() ||
+        schema.at("properties").at("title").size() != 1 ||
+        !schema.at("properties").at("title").contains("type") ||
+        !schema.at("properties").at("title").at("type").is_string() ||
+        schema.at("properties").at("title").at("type") != "string" ||
+        !schema.contains("required") || !schema.at("required").is_array() ||
+        schema.at("required").size() != 1 || !schema.at("required").at(0).is_string() ||
+        schema.at("required").at(0) != "title" || !schema.contains("additionalProperties") ||
+        !schema.at("additionalProperties").is_boolean() ||
+        schema.at("additionalProperties") != false) {
+        return false;
+    }
+    return true;
+}
+
+bool parse_structured_title(const Json& body) {
+    if (!body.contains("output_config") || body.at("output_config").is_null()) { return false; }
+    const Json& config = body.at("output_config");
+    if (!config.is_object() || !config.contains("format") || config.at("format").is_null()) {
+        return false;
+    }
+    if (!is_supported_title_schema(config.at("format"))) {
+        bad_request("only the title JSON schema is supported for output_config.format",
+                    "output_config.format", "output_config_format_not_supported");
+    }
+    return true;
+}
+
+void parse_effort(const Json& body, GenerationRequest& request) {
     if (!body.contains("output_config") || body.at("output_config").is_null()) { return; }
     const Json& config = body.at("output_config");
     if (!config.is_object()) { bad_request("output_config must be an object", "output_config"); }
-    if (purpose == ParsePurpose::Messages && config.contains("format") &&
-        !config.at("format").is_null()) {
-        bad_request("output_config.format requires constrained decoding, which NInfer does not "
-                    "provide",
-                    "output_config.format", "output_config_format_not_supported");
-    }
     if (!config.contains("effort") || config.at("effort").is_null()) { return; }
     if (!config.at("effort").is_string()) {
         bad_request("output_config.effort must be a string", "output_config.effort");
@@ -1021,7 +1054,7 @@ void parse_common_prompt(const Json& body, GenerationRequest& request, ParsePurp
     parse_system(body, request);
     parse_messages(body, request);
     parse_thinking(body, request, purpose, effective_max_tokens);
-    parse_effort(body, request, purpose);
+    parse_effort(body, request);
     apply_anthropic_prompt_cache_policy(body, request);
     if (body.contains("container") && !body.at("container").is_null()) {
         bad_request("container requires an external execution environment that NInfer does not "
@@ -1068,6 +1101,20 @@ AnthropicMessagesRequest parse_anthropic_messages_request(const Json& body,
     parse_common_prompt(body, result.generation, ParsePurpose::Messages,
                         result.generation.max_tokens);
     parse_generation_fields(body, result.generation);
+    result.structured_title = parse_structured_title(body);
+    if (result.structured_title) {
+        if (!result.stream) {
+            bad_request("title JSON schema output requires stream=true", "stream",
+                        "output_config_format_not_supported");
+        }
+        if (result.generation.reasoning_effort != RequestedReasoningEffort::High) {
+            bad_request("title JSON schema output requires output_config.effort='high'",
+                        "output_config.effort", "output_config_format_not_supported");
+        }
+        // Claude Code includes its regular tool list in title requests, but title generation has no
+        // reason to execute tools and the schema response must remain a single text block.
+        result.generation.tool_choice.mode = ToolChoiceMode::None;
+    }
     return result;
 }
 

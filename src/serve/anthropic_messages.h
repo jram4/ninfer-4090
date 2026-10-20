@@ -21,6 +21,7 @@ struct AnthropicMessagesRequest {
     GenerationRequest generation;
     bool stream                 = false;
     bool output_tokens_explicit = false;
+    bool structured_title       = false;
 };
 
 struct AnthropicCountTokensRequest {
@@ -52,7 +53,8 @@ std::string make_anthropic_count_tokens_response(int input_tokens);
 
 class AnthropicMessagesStream {
 public:
-    AnthropicMessagesStream(AnthropicResponseIdentity identity, int input_tokens);
+    AnthropicMessagesStream(AnthropicResponseIdentity identity, int input_tokens,
+                           bool structured_title = false);
 
     // The Engine start event is exact for normal streams. The no-argument form is reserved for an
     // error raised before admission, so an Anthropic error event still has a valid stream prefix.
@@ -80,8 +82,9 @@ private:
     int text_index_     = -1;
     bool started_       = false;
     bool finished_      = false;
-    bool thinking_open_ = false;
-    bool text_open_     = false;
+    bool thinking_open_    = false;
+    bool text_open_        = false;
+    bool structured_title_ = false;
 };
 
 } // namespace ninfer::serve
