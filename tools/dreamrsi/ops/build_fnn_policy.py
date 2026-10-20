@@ -90,6 +90,8 @@ def build_specification(args: argparse.Namespace) -> dict:
             "timeout_seconds": 14400,
             "required_evidence": [evidence],
             "criteria": {"equals": {"status": "pass"}, **extra},
+            # A fixed generation seed, so the two arms perform the same work.
+            "env": {"NINFER_EVAL_SEED": args.seed},
         }
         if gate:
             stage["gates"] = [gate]
@@ -118,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="ignored; the transport resolves the trusted harness at run time")
     parser.add_argument("--baseline-id", default="baseline-sampled-k7-70ebb12")
     parser.add_argument("--corpus-id", default="")
+    parser.add_argument("--seed", default="7008",
+                        help="fixed generation seed used by both arms of every comparison")
     parser.add_argument("--qualification-enabled", action="store_true")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)

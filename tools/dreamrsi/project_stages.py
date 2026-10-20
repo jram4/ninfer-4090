@@ -233,7 +233,7 @@ def _gpu_health() -> dict[str, Any]:
 
 
 def _start_serve(binary: Path, model: Path, template: Path, log_path: Path,
-                  port: int) -> subprocess.Popen[bytes]:
+                  port: int, seed: int | None = None) -> subprocess.Popen[bytes]:
     argv = [
         str(binary), str(model),
         "--host", "127.0.0.1", "--port", str(port),
@@ -246,6 +246,11 @@ def _start_serve(binary: Path, model: Path, template: Path, log_path: Path,
         "--preserve-thinking", "--default-max-tokens", "8192",
         "--request-log-jsonl", str(log_path),
     ]
+    if seed is not None:
+        # The captured requests carry no generation seed, so without this the
+        # server would sample a fresh seed per request and the two arms would
+        # not perform the same work.
+        argv.extend(["--seed", str(seed)])
     process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                start_new_session=True)
     deadline = time.monotonic() + 600
@@ -443,12 +448,24 @@ def _replay_to_rows(plan: dict[str, Any], split: str, capsule_root: Path,
     return rows
 
 
+def _evaluation_seed() -> int | None:
+    """The fixed generation seed both arms must use, from the trusted policy."""
+    raw = os.environ.get("NINFER_EVAL_SEED")
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        seed = int(str(raw).strip())
+    except ValueError as exc:
+        raise ProjectStageError(f"the trusted policy declares an invalid seed: {raw!r}") from exc
+    return seed
+
+
 def _replay_with_server(plan: dict[str, Any], split: str, binary: Path, model: Path,
                         template: Path, capsule_root: Path, rows_path: Path,
-                        port: int) -> list[dict[str, Any]]:
+                        port: int, seed: int | None = None) -> list[dict[str, Any]]:
     """Start one server, replay a split against it, and merge its telemetry."""
     log_path = rows_path.with_suffix(".serve.jsonl")
-    process = _start_serve(binary, model, template, log_path, port)
+    process = _start_serve(binary, model, template, log_path, port, seed)
     try:
         rows = _replay_to_rows(plan, split, capsule_root,
                                f"http://127.0.0.1:{port}", rows_path)
@@ -489,10 +506,14 @@ def _candidate_arm(args: argparse.Namespace, split: str, evidence_name: str) -> 
     baseline_port = int(os.environ.get("NINFER_BASELINE_PORT", "18098"))
     candidate_port = int(os.environ.get("NINFER_REPLAY_PORT", "18099"))
 
+    seed = _evaluation_seed()
+    if seed is None:
+        raise ProjectStageError(
+            "the trusted policy must declare a fixed generation seed for the paired arms")
     _replay_with_server(plan, split, baseline_binary, model, template, capsule_root,
-                         baseline_rows, baseline_port)
+                         baseline_rows, baseline_port, seed)
     _replay_with_server(plan, split, candidate_binary, model, template, capsule_root,
-                         rows_path, candidate_port)
+                         rows_path, candidate_port, seed)
     return _compare(plan, split, baseline_rows, rows_path, report, evidence_name,
                     {"holdout_result": "pass"} if split == "holdout" else None)
 
@@ -523,7 +544,7 @@ def stage_smoke(_: argparse.Namespace) -> int:
         raise ProjectStageError("the trusted policy did not provide the model artifact and template")
     log_path = _raw_path("smoke-serve.jsonl")
     port = int(os.environ.get("NINFER_SMOKE_PORT", "18099"))
-    process = _start_serve(binary, model, template, log_path, port)
+    process = _start_serve(binary, model, template, log_path, port, _evaluation_seed())
     try:
         completion = _smoke_request(port)
     finally:
