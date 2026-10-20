@@ -894,6 +894,9 @@ def _expand_argv(stage: Mapping[str, Any], paths: Mapping[str, Path | str],
         "source_snapshot_sha256": str(submission["source"]["snapshot_sha256"]),
         "build_key": build_key,
         "stage": str(stage["name"]),
+        # Where this trusted evaluator itself lives, so a stage command can
+        # refer to its sibling modules without the policy naming a path.
+        "trusted_harness": str(Path(__file__).resolve().parent),
     }
     return [
         _replace_known_placeholders(argument, values)
