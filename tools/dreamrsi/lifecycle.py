@@ -326,7 +326,7 @@ def gpu_runtime_health() -> dict[str, Any]:
         driver.cuInit.restype = ctypes.c_int
         driver.cuDeviceGetCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
         driver.cuDeviceGetCount.restype = ctypes.c_int
-        driver.cuGetErrorString.argtypes = [ctypes.c_int, ctypes.c_char_p]
+        driver.cuGetErrorString.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
         driver.cuGetErrorString.restype = ctypes.c_int
     except AttributeError as exc:  # pragma: no cover - defensive
         result["error"] = f"the CUDA driver API is incomplete: {exc}"
@@ -336,7 +336,8 @@ def gpu_runtime_health() -> dict[str, Any]:
     if status != 0:
         message = ctypes.c_char_p()
         driver.cuGetErrorString(status, ctypes.byref(message))
-        result["error"] = f"cuInit returned {status}: {message.value.decode('utf-8', 'replace')}"
+        text = message.value.decode("utf-8", "replace") if message.value else "unknown error"
+        result["error"] = f"cuInit returned {status}: {text}"
         return result
     count = ctypes.c_int(0)
     status = driver.cuDeviceGetCount(ctypes.byref(count))
