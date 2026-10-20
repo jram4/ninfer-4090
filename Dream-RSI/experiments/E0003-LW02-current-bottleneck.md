@@ -1,6 +1,6 @@
 # E0003-LW02 current bottleneck profile
 
-**Status: incomplete; one fresh public request was measured and profiled.** The user-directed wind-down arrived after the one successful capture. No second workload, clarification capture, optimization, or H02 comparison was started. H02 is **unadjudicated** by this record.
+**Status: terminal trace reanalysis complete; one fresh public request was measured and profiled.** The existing capture is sufficient for phase attribution. No clarification capture or optimization was run. H02 is adjudicated for this sampled K7 request; this single sample does not establish behavior across contexts.
 
 ## Scope and provenance
 
@@ -51,10 +51,38 @@ Summed graph-kernel duration intersecting those rounds was 1.3721 s across 45,39
 | Attention | 1.46% |
 | Sampling/MTP control | 0.62% |
 
-The request is GPU-compute dominated, with linear/GEMM kernels the largest measured family. The trace supports that family-level attribution, but this short one-request sample does not isolate a single kernel’s removable end-to-end share, establish an optimization’s gain, or generalize across contexts. Therefore it cannot adjudicate H02 or justify a latency-only candidate against the `0.245` share bound. No further profile was run.
+The graph-node export preserves `originalGraphNodeId` for instantiated replay graphs. I joined replay graph IDs 9 and 11 to their original nodes in capture graphs 1 and 2, then assigned each capture node by its creation timestamp and thread to the active source NVTX range. The request window contains 52 `decode.mtp_round` scopes (the two earlier scopes are warmup). This maps 45,344 of 45,396 request graph-kernel events to a named phase; the 52 unclassified events account for 0.067 ms, or 0.0049% of graph-kernel time. The trace is structurally sufficient without another capture.
+
+`verify.attention` and `verify.gdn` in `TextContext::run_layers` cover only the respective mixer. `verify.post_mixer` covers post-attention RMSNorm plus FFN. `decode.mtp.target_head` covers final RMSNorm and target vocabulary projection for this sparse MTP route; its optional argmax path is not used here. The target-verification acceptance sampler runs after the target-head range and is split by kernel symbol below. The MTP alignment range includes its first MTP forward; later MTP forwards and proposal sampling are separated below. Percentages use both summed graph-kernel time (for comparison to the preceding family table) and the 52 outer round wall total (for end-to-end share).
+
+| Exclusive request phase | Graph-kernel time | Share of graph kernels | Share of outer round wall |
+|---|---:|---:|---:|
+| Target post-mixer (RMSNorm + FFN) | 588.962 ms | 42.92% | 41.86% |
+| Target GDN mixer | 277.960 ms | 20.26% | 19.76% |
+| Serial MTP forward | 164.562 ms | 11.99% | 11.70% |
+| MTP proposal Q4 vocabulary GEMV | 137.210 ms | 10.00% | 9.75% |
+| MTP proposal sampling | 5.647 ms | 0.41% | 0.40% |
+| Target-verification acceptance sampling | 2.522 ms | 0.18% | 0.18% |
+| Target full-attention mixer | 90.226 ms | 6.58% | 6.41% |
+| Target head | 74.883 ms | 5.46% | 5.32% |
+| MTP alignment, including first forward | 29.834 ms | 2.17% | 2.12% |
+| Target selection/state bookkeeping | 0.228 ms | 0.02% | 0.02% |
+| Unclassified | 0.067 ms | 0.005% | 0.005% |
+
+The request rounds sum to 1.406960 s (27.057 ms/round); the unprofiled reference decode wall was 1.3881 s, 18.9 ms lower. Both runs have matching request, prompt, and completion hashes and the same 52-round / 352-drafted / 75-accepted counters. The round count and accepted-draft count imply 127 decode commits (`52 + 75`); the remaining completion token is the first token emitted by prefill, which is excluded from decode-round counters by the `RuntimeStats` contract in `include/ninfer/types.h`. Thus the 128 completion tokens reconcile exactly. The profile request itself is not used as a throughput result.
+
+The 1.372100 s summed graph-kernel time is 97.52% of outer round wall. `decode.mtp.submit` contributes 28.894 ms (2.05% of round wall); `decode.mtp.wait` and its 52 `cudaStreamSynchronize` calls total 1.377850 s but mostly wait for the graph work and must not be added to kernel time as a separate cost. The GPU-kernel union is 1.371603 s, so launch/host gaps and other uncovered round time together are about 35.4 ms over the request.
+
+## H02 disposition and bounded candidate
+
+Target verify is the dominant measured area in this capture: the GDN, full-attention, post-mixer, target residual, and target-head phases total 1.034780 s, or 73.55% of outer round wall. The strongest bounded lead is the target `verify.post_mixer` path for the K7 workload (target width at most 8): it occupies 41.86% of round wall and requires a 58.5% reduction in that phase to meet the `0.245` share bound. Its largest kernel is the current Q4 `linear_swiglu` small-T route for `[34816, 5120]`, at 357.556 ms total (25.41% of round wall); that kernel alone would need a 96.4% reduction, so it is not a credible standalone route. The complete post-mixer phase also includes the Q5 residual projection `[5120, 17408]` and RMSNorm. No implementation or performance gain is claimed; continue this lead only if a bounded public-Op measurement demonstrates the required reduction for the complete phase.
+
+The independent numerical oracle for that candidate is a naive FP32/FP64 reference over the represented public inputs: independently decode the stored Q4/Q5 packed codes, Q5 high bits, and scales, then evaluate RMSNorm, the complete gate/up linear plus SwiGLU formula, and the down projection plus residual. Compare every affected public Op output under its suite-owned criterion at the semantic BF16 boundaries. Any composed candidate must preserve the observed BF16 boundaries between those Ops, and then pass the existing production Engine positive-temperature output-quality gate. A production kernel, a second GPU route, or plausible model output is not the mathematical oracle.
+
+The MTP-only routes are ruled out by the latency-share bound. Alignment + serial MTP forward + proposal work total 337.253 ms, or 23.97% of outer round wall; even removing all of it would miss 0.245. Proposal head/sampling plus target head and target acceptance sampling total 15.65% of round wall. The proposal phase is nearly all Q4 vocabulary GEMV (137.210 ms); the two proposal-sampling kernels total 5.647 ms, while target-verification acceptance sampling totals 2.522 ms. Host submit is 2.05%, while synchronization time is dominated by waiting for GPU work. H02 therefore does not support a draft/head/sampling/host implementation. It yields one conditional target post-mixer candidate and its oracle, but the trace alone does not establish that the required 58.5% reduction is plausible. No clarification capture was justified after resolving the phase mapping, and no optimization was started.
 
 ## Evidence location and remaining work
 
 Owner-only raw artifacts are under the FNN identity root, relative to that root: `results/reference/`, `results/profile/`, `results/ninfer-build.log`, and `results/ffmpeg-build.log`. These contain the logs, measurements, Nsight report, and SQLite export; they remain private and are excluded from Git. This checked-in record contains only aggregate, public-safe evidence.
 
-Completed: exact-base checkout; private dependency verification/build; Release/sm_89 application build; one positive-temperature reference request; one corrected one-request graph-node capture; profile counter and NVTX/kernel-timeline extraction; production-unit inactive checks. Not run: unit tests (not requested), any optimizer or candidate experiment, any second/longer/profile control request, context-length stratification, whole-inference benchmark campaign, or H02 adjudication. The parent should treat this return as a bounded observation, not a completed optimization decision.
+Completed: exact-base checkout; private dependency verification/build; Release/sm_89 application build; one positive-temperature reference request; one corrected one-request graph-node capture; profile counter and NVTX/kernel-timeline extraction; production-unit inactive checks; offline replay-to-capture node attribution and H02 phase/share analysis. Not run: unit tests (not requested), an optimizer or candidate experiment, another request/profile, context-length stratification, or a whole-inference benchmark campaign. The parent should treat this as a bounded H02 finding with a conditional target post-mixer lead, not an optimization decision.
