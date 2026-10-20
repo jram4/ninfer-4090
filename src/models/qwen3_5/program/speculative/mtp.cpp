@@ -175,6 +175,8 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
             card.mtp_propose_batch(ar_hidden, proposal_logits, draft0, next_candidate_ids,
                                    next_proposal_q, 0, first_position, licensed_tokens,
                                    licensed_counts, next_drafts, 0, 0);
+            Tensor ar_input_hidden  = ar_hidden;
+            Tensor ar_output_hidden = next_hidden;
             for (std::uint32_t step = 0; step + 1 < k; ++step) {
                 Tensor previous =
                     next_drafts.slice(1, static_cast<std::int32_t>(step), 1).view({batch_size});
@@ -187,23 +189,25 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                 Tensor valid = ar_valid_columns.slice(1, static_cast<std::int32_t>(step), 1)
                                    .view({batch_size});
                 Tensor previous_batch = previous.view({1, batch_size});
-                Tensor hidden_batch   = ar_hidden.view(
+                Tensor hidden_batch   = ar_input_hidden.view(
                     {dimension(state.execution.parameters.model.config().text.hidden_size), 1,
                        batch_size});
-                Tensor next_hidden_batch = next_hidden.view(
+                Tensor next_hidden_batch = ar_output_hidden.view(
                     {dimension(state.execution.parameters.model.config().text.hidden_size), 1,
                      batch_size});
                 card.mtp_forward_decode_batch(previous_batch, hidden_batch, position, rope, valid,
                                               mtp_rows, envelopes.ar[step], next_hidden_batch);
                 Tensor proposal_position = ar_positions.slice(1, static_cast<std::int32_t>(step), 1)
                                                .view({batch_size});
-                card.mtp_propose_batch(next_hidden, proposal_logits, next, next_candidate_ids,
+                card.mtp_propose_batch(ar_output_hidden, proposal_logits, next, next_candidate_ids,
                                        next_proposal_q, static_cast<std::int32_t>(step + 1),
                                        proposal_position, licensed_tokens, licensed_counts,
                                        next_drafts, static_cast<std::int32_t>(step + 1), 1);
-                CUDA_CHECK(cudaMemcpyAsync(ar_hidden.data, next_hidden.data, ar_hidden.bytes(),
-                                           cudaMemcpyDeviceToDevice,
-                                           state.execution.device.stream));
+                // The previous input is dead after this step. Ping-pong the existing frame
+                // buffers so the next autoregressive step consumes the producer buffer directly.
+                Tensor recycled_hidden = ar_input_hidden;
+                ar_input_hidden         = ar_output_hidden;
+                ar_output_hidden        = recycled_hidden;
             }
         }
 
