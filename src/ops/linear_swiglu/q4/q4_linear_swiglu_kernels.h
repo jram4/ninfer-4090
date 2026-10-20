@@ -16,6 +16,8 @@ void q4_linear_swiglu_mma_split_half_pair_r32_c128_tail_launch(const Tensor& x, 
                                                                Tensor& out, cudaStream_t stream);
 void q4_linear_swiglu_ada_small_t_launch(const Tensor& x, const Weight& w, Tensor& out,
                                          cudaStream_t stream);
+void q4_linear_swiglu_split_k_launch(const Tensor& x, const Weight& w, Tensor& out,
+                                     Tensor& partial, cudaStream_t stream);
 void q4_linear_swiglu_small_t_tiled_launch(const Tensor& x, const Weight& w, Tensor& out,
                                            cudaStream_t stream);
 

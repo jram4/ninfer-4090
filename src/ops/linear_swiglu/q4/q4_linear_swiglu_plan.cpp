@@ -32,11 +32,13 @@ struct RouteSpec {
 
 constexpr Q4LinearSwiGluProblem kShape{34816, 17408, 5120, 5120, 1};
 
-// T = 2..16 is the speculative verify band: the Ada small-T kernel reads the gate/up weights once for
-// every width in it, where the K-split tile slows down from T=9.
-constexpr std::array<RouteSpec, 11> kRoutes{{
+// T = 2..7 and 9..16 use the Ada small-T kernel. Exact T=8 uses the bounded split-K route; wider
+// intervals retain their existing materialized and split-half implementations.
+constexpr std::array<RouteSpec, 13> kRoutes{{
     {{1, 1}, Q4LinearSwiGluScheduleId::GemvPair},
-    {{2, 16}, Q4LinearSwiGluScheduleId::AdaSmallTMma},
+    {{2, 7}, Q4LinearSwiGluScheduleId::AdaSmallTMma},
+    {{8, 8}, Q4LinearSwiGluScheduleId::SplitKPair},
+    {{9, 16}, Q4LinearSwiGluScheduleId::AdaSmallTMma},
     {{17, 32}, Q4LinearSwiGluScheduleId::SmallTTiled},
     {{33, 128}, Q4LinearSwiGluScheduleId::Materialized},
     {{129, 168}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128Tail},
@@ -77,6 +79,17 @@ std::size_t materialized_workspace_bytes(std::int32_t rows, std::int32_t cols) {
     return layout.peak_bytes(1);
 }
 
+template <class Allocator>
+Tensor allocate_split_k_workspace(Allocator& allocator, std::int32_t rows, std::int32_t cols) {
+    return allocator.alloc(DType::FP32, {4 * rows, cols});
+}
+
+std::size_t split_k_workspace_bytes(std::int32_t rows, std::int32_t cols) {
+    WorkspaceLayoutBuilder layout;
+    (void)allocate_split_k_workspace(layout, rows, cols);
+    return layout.peak_bytes(1);
+}
+
 } // namespace
 
 const char* q4_linear_swiglu_schedule_name(Q4LinearSwiGluScheduleId schedule) noexcept {
@@ -85,6 +98,8 @@ const char* q4_linear_swiglu_schedule_name(Q4LinearSwiGluScheduleId schedule) no
         return "linear_swiglu.q4.gemv.paired_rows";
     case Q4LinearSwiGluScheduleId::AdaSmallTMma:
         return "linear_swiglu.q4.ada.small_t.mma";
+    case Q4LinearSwiGluScheduleId::SplitKPair:
+        return "linear_swiglu.q4.split_k_pair.t8";
     case Q4LinearSwiGluScheduleId::SmallTTiled:
         return "linear_swiglu.q4.mma.small_t.tiled";
     case Q4LinearSwiGluScheduleId::Materialized:
@@ -119,6 +134,9 @@ Q4LinearSwiGluPlan q4_linear_swiglu_resolve_plan(const Q4LinearSwiGluProblem& pr
         case Q4LinearSwiGluScheduleId::SmallTTiled:
         case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128:
         case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128Tail:
+            return plan;
+        case Q4LinearSwiGluScheduleId::SplitKPair:
+            plan.workspace_bytes = split_k_workspace_bytes(problem.output_rows, problem.cols);
             return plan;
         case Q4LinearSwiGluScheduleId::Materialized:
             plan.workspace_bytes = materialized_workspace_bytes(problem.gate_up_rows, problem.cols);
@@ -164,6 +182,12 @@ void q4_linear_swiglu_execute_plan(const Q4LinearSwiGluPlan& plan, const Tensor&
     case Q4LinearSwiGluScheduleId::AdaSmallTMma:
         q4_linear_swiglu_ada_small_t_launch(x, w, out, stream);
         return;
+    case Q4LinearSwiGluScheduleId::SplitKPair: {
+        auto scratch_scope = ws.scope();
+        Tensor partial = allocate_split_k_workspace(ws, problem.output_rows, problem.cols);
+        q4_linear_swiglu_split_k_launch(x, w, out, partial, stream);
+        return;
+    }
     case Q4LinearSwiGluScheduleId::SmallTTiled:
         q4_linear_swiglu_small_t_tiled_launch(x, w, out, stream);
         return;

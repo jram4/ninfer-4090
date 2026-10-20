@@ -17,12 +17,12 @@ namespace ninfer::ops::detail {
 // Q4_G64_FP16 and Q5_G64_FP16 layouts (32 code bytes per 64-weight group, weight k in byte k / 2,
 // low nibble first; Q5 adds 8 high-bit bytes per group, bit b of byte j holding weight 8j + b).
 //
-// A CTA owns 8 * RowTiles weight rows over the whole K and streams them through a cp.async pipeline
-// of GroupsPerStage groups per stage. Global reads are contiguous 16-byte chunks per row; the row
-// paddings below keep the fragment reads out of shared memory bank-conflict free. x is L2-resident
-// at these widths and is prefetched into registers one stage ahead instead of taking pipeline
-// space. Warps split each stage's groups and reduce through shared memory at the end, so every
-// weight byte is read once for any T <= 8 * TokenTiles.
+// A CTA owns 8 * RowTiles weight rows and one Y-grid K partition, streaming GroupsPerStage groups
+// per stage. The schedule's KPartitions cover the full K. Global reads are contiguous 16-byte
+// chunks per row; the row paddings below keep fragment reads out of shared-memory bank conflicts.
+// x is L2-resident at these widths and is prefetched into registers one stage ahead instead of
+// taking pipeline space. Warps split each stage's groups and reduce through shared memory at the
+// end, so every weight byte is read once across all K partitions for any T <= 8 * TokenTiles.
 //
 // Per group a lane owns 16 consecutive weights (8 code bytes) of one row. MMA step s maps K slots
 // {2q, 2q+1} to weights 16q + 4s + {0,1} and slots {2q+8, 2q+9} to 16q + 4s + {2,3}; x is read with
@@ -31,7 +31,7 @@ namespace ninfer::ops::detail {
 enum class AdaWeightFormat { Q4, Q5 };
 
 template <AdaWeightFormat Format, int RowTiles, int Warps, int TokenTiles, int GroupsPerStage,
-          int Stages>
+          int Stages, int KPartitions = 1>
 struct AdaSmallTSchedule {
     static constexpr AdaWeightFormat kFormat = Format;
     static constexpr bool kHasHigh           = Format == AdaWeightFormat::Q5;
@@ -40,6 +40,7 @@ struct AdaSmallTSchedule {
     static constexpr int kTokenTiles         = TokenTiles;
     static constexpr int kG                  = GroupsPerStage;
     static constexpr int kStages             = Stages;
+    static constexpr int kKPartitions        = KPartitions;
     static constexpr int kRowsPerCta         = 8 * RowTiles;
     static constexpr int kThreads            = 32 * Warps;
     static constexpr int kMaxTokens          = 8 * TokenTiles;
@@ -58,17 +59,22 @@ struct AdaSmallTSchedule {
     static constexpr int kSmemBytes = std::max(kStages * kStageBytes, kReductionBytes);
 
     static_assert(RowTiles >= 1 && Warps >= 1 && (TokenTiles == 1 || TokenTiles == 2));
+    static_assert(KPartitions >= 1);
     static_assert(kG == 4 || kG == 8 || kG == 16);
     static_assert(kG % kWarps == 0);
     static_assert(kStages >= 2 && kStages <= 8);
 };
 
-template <int RowTiles, int Warps, int TokenTiles, int GroupsPerStage, int Stages>
+template <int RowTiles, int Warps, int TokenTiles, int GroupsPerStage, int Stages,
+          int KPartitions = 1>
 using Q5AdaSmallTSchedule =
-    AdaSmallTSchedule<AdaWeightFormat::Q5, RowTiles, Warps, TokenTiles, GroupsPerStage, Stages>;
-template <int RowTiles, int Warps, int TokenTiles, int GroupsPerStage, int Stages>
+    AdaSmallTSchedule<AdaWeightFormat::Q5, RowTiles, Warps, TokenTiles, GroupsPerStage, Stages,
+                      KPartitions>;
+template <int RowTiles, int Warps, int TokenTiles, int GroupsPerStage, int Stages,
+          int KPartitions = 1>
 using Q4AdaSmallTSchedule =
-    AdaSmallTSchedule<AdaWeightFormat::Q4, RowTiles, Warps, TokenTiles, GroupsPerStage, Stages>;
+    AdaSmallTSchedule<AdaWeightFormat::Q4, RowTiles, Warps, TokenTiles, GroupsPerStage, Stages,
+                      KPartitions>;
 
 // CTA b owns weight rows [b * rows, (b + 1) * rows).
 struct AdaContiguousRows {
@@ -118,11 +124,13 @@ __launch_bounds__(S::kThreads) __global__ void ada_small_t_mma_kernel(
     const std::uint8_t* __restrict__ high, const std::uint8_t* __restrict__ scales,
     std::int32_t tokens, Epilogue epilogue) {
     constexpr int kGroupK = 64;
-    static_assert(K % (kGroupK * S::kG) == 0);
-    constexpr int kGroups     = K / kGroupK;
+    static_assert(K % (kGroupK * S::kG * S::kKPartitions) == 0);
+    constexpr int kFullGroups = K / kGroupK;
+    constexpr int kGroups     = kFullGroups / S::kKPartitions;
     constexpr int kPipeStages = kGroups / S::kG;
     constexpr int R           = S::kRowTiles;
     constexpr int kRows       = S::kRowsPerCta;
+    const int kGroupOffset    = static_cast<int>(blockIdx.y) * kGroups;
 
     extern __shared__ __align__(16) std::uint8_t smem[];
 
@@ -137,7 +145,7 @@ __launch_bounds__(S::kThreads) __global__ void ada_small_t_mma_kernel(
         std::uint8_t* code_dst  = smem + (stage % S::kStages) * S::kStageBytes;
         std::uint8_t* high_dst  = code_dst + S::kCodeBytes;
         std::uint8_t* scale_dst = high_dst + S::kHighBytes;
-        const int g0            = stage * S::kG;
+        const int g0            = kGroupOffset + stage * S::kG;
 
         constexpr int kCodeChunks = 2 * S::kG;
         for (int i = tid; i < kRows * kCodeChunks; i += S::kThreads) {
@@ -145,7 +153,7 @@ __launch_bounds__(S::kThreads) __global__ void ada_small_t_mma_kernel(
             const int c   = i % kCodeChunks;
             const std::int64_t src_row = RowMap::weight_row(block, row, kRows);
             cp_async<16, Cache::cg>(code_dst + row * S::kCodeStride + 16 * c,
-                                    codes + (src_row * kGroups + g0) * 32 + 16 * c);
+                                    codes + (src_row * kFullGroups + g0) * 32 + 16 * c);
         }
         if constexpr (S::kHasHigh) {
             constexpr int kHighChunks = S::kG / 2;
@@ -154,14 +162,14 @@ __launch_bounds__(S::kThreads) __global__ void ada_small_t_mma_kernel(
                 const int c   = i % kHighChunks;
                 const std::int64_t src_row = RowMap::weight_row(block, row, kRows);
                 cp_async<16, Cache::cg>(high_dst + row * S::kHighStride + 16 * c,
-                                        high + (src_row * kGroups + g0) * 8 + 16 * c);
+                                        high + (src_row * kFullGroups + g0) * 8 + 16 * c);
             }
         }
         if constexpr (S::kG == 4) {
             for (int row = tid; row < kRows; row += S::kThreads) {
                 const std::int64_t src_row = RowMap::weight_row(block, row, kRows);
                 cp_async<8>(scale_dst + row * S::kScaleStride,
-                            scales + (src_row * kGroups + g0) * 2);
+                            scales + (src_row * kFullGroups + g0) * 2);
             }
         } else {
             constexpr int kScaleChunks = S::kG / 8;
@@ -170,7 +178,7 @@ __launch_bounds__(S::kThreads) __global__ void ada_small_t_mma_kernel(
                 const int c   = i % kScaleChunks;
                 const std::int64_t src_row = RowMap::weight_row(block, row, kRows);
                 cp_async<16, Cache::cg>(scale_dst + row * S::kScaleStride + 16 * c,
-                                        scales + (src_row * kGroups + g0) * 2 + 16 * c);
+                                        scales + (src_row * kFullGroups + g0) * 2 + 16 * c);
             }
         }
     };
@@ -189,7 +197,7 @@ __launch_bounds__(S::kThreads) __global__ void ada_small_t_mma_kernel(
         const uint4 zero{0u, 0u, 0u, 0u};
 #pragma unroll
         for (int j = 0; j < J; ++j) {
-            const int k0 = (stage * S::kG + warp + j * S::kWarps) * kGroupK;
+            const int k0 = (kGroupOffset + stage * S::kG + warp + j * S::kWarps) * kGroupK;
             const auto* lo = reinterpret_cast<const uint4*>(x_lo_src + k0);
             const auto* hi = reinterpret_cast<const uint4*>(x_hi_src + k0);
             dst[j].lo[0] = lo_valid ? __ldg(lo) : zero;
@@ -308,33 +316,45 @@ __launch_bounds__(S::kThreads) __global__ void ada_small_t_mma_kernel(
             const int row   = index % kHalf;
             const int token = index / kHalf;
             if (token >= tokens) { continue; }
-            epilogue(block * kHalf + row, token, reduce(row, token), reduce(row + kHalf, token));
+            if constexpr (S::kKPartitions == 1) {
+                epilogue(block * kHalf + row, token, reduce(row, token),
+                         reduce(row + kHalf, token));
+            } else {
+                epilogue(block * kHalf + row, token, reduce(row, token),
+                         reduce(row + kHalf, token), static_cast<int>(blockIdx.y));
+            }
         }
     } else {
         for (int index = tid; index < kRows * S::kMaxTokens; index += S::kThreads) {
             const int row   = index % kRows;
             const int token = index / kRows;
             if (token >= tokens) { continue; }
-            epilogue(RowMap::weight_row(block, row, kRows), token, reduce(row, token));
+            if constexpr (S::kKPartitions == 1) {
+                epilogue(RowMap::weight_row(block, row, kRows), token, reduce(row, token));
+            } else {
+                epilogue(RowMap::weight_row(block, row, kRows), token, reduce(row, token),
+                         static_cast<int>(blockIdx.y));
+            }
         }
     }
 }
 
-// Launches one CTA per 8 * RowTiles weight rows; `rows` must be a multiple of that.
+// Launches one CTA per output-row tile and scheduled K partition; `rows` must be a multiple of the
+// tile height.
 template <class S, int K, class RowMap = AdaContiguousRows, class Epilogue>
 void ada_small_t_mma_launch(const __nv_bfloat16* x, std::int32_t x_ld, const std::uint8_t* codes,
                             const std::uint8_t* high, const std::uint8_t* scales, std::int32_t rows,
                             std::int32_t tokens, Epilogue epilogue, cudaStream_t stream) {
     static const bool configured = [] {
         CUDA_CHECK(cudaFuncSetAttribute(ada_small_t_mma_kernel<S, K, RowMap, Epilogue>,
-                                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                        S::kSmemBytes));
+                                        cudaFuncAttributeMaxDynamicSharedMemorySize, S::kSmemBytes));
         return true;
     }();
     (void)configured;
+    const dim3 grid(rows / S::kRowsPerCta, S::kKPartitions);
     ada_small_t_mma_kernel<S, K, RowMap, Epilogue>
-        <<<rows / S::kRowsPerCta, S::kThreads, S::kSmemBytes, stream>>>(x, x_ld, codes, high,
-                                                                        scales, tokens, epilogue);
+        <<<grid, S::kThreads, S::kSmemBytes, stream>>>(x, x_ld, codes, high, scales, tokens,
+                                                       epilogue);
 }
 
 } // namespace ninfer::ops::detail
