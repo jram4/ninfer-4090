@@ -1210,6 +1210,12 @@ def _validate_evidence_report(core: Any, *, report_path: Path, artifact_path: Pa
         "inconclusive", "noise", "noisy", "underpowered", "insufficient"
     }:
         raise _EvidenceError("stage evidence is noisy or inconclusive", inconclusive=True)
+    if isinstance(report_status, str) and report_status.lower() == "blocked":
+        # The stage could not run because the host is not fit, not because the
+        # candidate failed.
+        raise _PipelineFault("blocked", stage["name"], "infrastructure",
+                             f"trusted {stage['name']} stage was blocked: "
+                             f"{report.get('detail', 'no detail')}")
     if isinstance(report_status, str) and report_status.lower() in {
         "rejected", "regression", "fail", "failed"
     }:

@@ -304,6 +304,50 @@ def assert_service_units_inactive(units: Sequence[str]) -> list[dict[str, str]]:
     return found
 
 
+def gpu_runtime_health() -> dict[str, Any]:
+    """Probe whether a fresh CUDA context can actually be created.
+
+    ``nvidia-smi`` and ``cuDriverGetVersion`` can both succeed while a context
+    cannot be created, which is exactly the failure mode a mismatched driver
+    produces. This probe initializes the driver and counts devices, so a host
+    that cannot run a new process is reported as unhealthy rather than being
+    mistaken for a candidate failure.
+    """
+    import ctypes
+
+    result: dict[str, Any] = {"ok": False, "cu_init": None, "device_count": 0, "error": None}
+    try:
+        driver = ctypes.CDLL("libcuda.so.1")
+    except OSError as exc:
+        result["error"] = f"libcuda.so.1 could not be loaded: {exc}"
+        return result
+    try:
+        driver.cuInit.argtypes = [ctypes.c_uint]
+        driver.cuInit.restype = ctypes.c_int
+        driver.cuDeviceGetCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        driver.cuDeviceGetCount.restype = ctypes.c_int
+        driver.cuGetErrorString.argtypes = [ctypes.c_int, ctypes.c_char_p]
+        driver.cuGetErrorString.restype = ctypes.c_int
+    except AttributeError as exc:  # pragma: no cover - defensive
+        result["error"] = f"the CUDA driver API is incomplete: {exc}"
+        return result
+    status = driver.cuInit(0)
+    result["cu_init"] = status
+    if status != 0:
+        message = ctypes.c_char_p()
+        driver.cuGetErrorString(status, ctypes.byref(message))
+        result["error"] = f"cuInit returned {status}: {message.value.decode('utf-8', 'replace')}"
+        return result
+    count = ctypes.c_int(0)
+    status = driver.cuDeviceGetCount(ctypes.byref(count))
+    result["device_count"] = count.value
+    if status != 0 or count.value <= 0:
+        result["error"] = f"cuDeviceGetCount returned {status} with {count.value} devices"
+        return result
+    result["ok"] = True
+    return result
+
+
 def gpu_snapshot() -> dict[str, Any]:
     result = subprocess.run(
         [

@@ -44,6 +44,12 @@ driver mismatch remained present, and a fresh driver initialization probe return
 or model load. This prevents new candidate GPU qualification. The existing service
 was not interrupted. Its activity is not proof that a fresh process can run.
 
+The mismatch is one reboot away: the on-disk kernel module is already `580.178.04`
+and matches the userspace; only the running module is the older `580.173.02`. The
+host has no passwordless sudo and polkit refuses a non-root reboot, so the owner
+must run the reboot. `linger` is enabled and the production unit is enabled and
+wanted by `default.target`, so it returns by itself after the reboot.
+
 No driver repair, reboot, production restart, or candidate deployment is performed
 by this tooling. Existing-endpoint capture is a separate, explicitly labelled
 operation and cannot establish isolated candidate performance.
@@ -141,15 +147,22 @@ by compare-and-swap and never pushes or deploys.
 
 ### 5. Capture and compare real traffic
 
+Capture runs on fnn in a labelled window. One window is one independent coding
+session, which is what lets the planner draw a holdout group:
+
 ```sh
-python3.11 -m tools.dreamrsi capture --upstream http://127.0.0.1:8080 \
-  --capture-dir <private-dir> --descriptor-jsonl <private-dir>/descriptors.jsonl \
-  --session-id <session> --task-label <label> --run-label <run> \
-  --traffic-class real_user --stratum <stratum>
+bash tools/dreamrsi/ops/capture_window.sh start my-session-01
+# ... run the coding client against http://100.119.241.20:18082 ...
+bash tools/dreamrsi/ops/capture_window.sh stop
 ```
 
+The window binds a private tailnet port, forwards to the production service
+unchanged, and writes owner-only capsules under
+`/home/aramirezfamily/.local/share/ninfer-bench/live-capture/<label>/` on fnn.
 Captured bodies never enter Git. Descriptors carry hashes and operational labels
-only. The corpus planner samples whole sessions, keeps disjoint holdout groups,
+only.
+
+The corpus planner samples whole sessions, keeps disjoint holdout groups,
 replays each selected session's captured prefix with explicit warmups, and never
 rewrites a request body or its output budget:
 
@@ -160,7 +173,8 @@ python3.11 -m tools.dreamrsi corpus plan --manifest <descriptors.jsonl> \
 ```
 
 A comparison is inconclusive when the data is insufficient; it is never a
-release signal on its own.
+release signal on its own. A plan built from a single session reports
+`inconclusive_insufficient_corpus` by design.
 
 ### 6. Epochs and workers
 
@@ -175,6 +189,35 @@ python3.11 -m tools.dreamrsi worker register --epoch-id <epoch> ...
 Workers are bound to one exact existing worktree, base commit, model, and path
 allowlist. Callback delivery is a durable outbox drained by software; there is no
 claimed host wake hook, and the tooling does not poll on an agent's behalf.
+
+## Stage ladder and who writes each stage
+
+The six stages run in order: `admission`, `build`, `correctness`, `smoke`,
+`screen`, `full`.
+
+| Stage | Program | What it proves |
+|---|---|---|
+| admission | `stage.py toolchain` | The host really has the pinned CMake and CUDA toolkit. |
+| build | `project_stages.py build` | The frozen source configures and compiles for the target GPU, and the evaluator hashes the produced binary itself. |
+| correctness | `project_stages.py correctness` | The affected contract and numerical tests pass. |
+| smoke | `project_stages.py smoke` | The candidate's own Serve starts, serves a request, and reports the runtime contract it actually loaded. |
+| screen | `project_stages.py screen` | The candidate replays the screen split and the paired reduction passes. |
+| full | `project_stages.py full` | The holdout split passes on unseen sessions. |
+
+A stage that reports a failing gate is a **candidate** failure. A stage whose
+evidence is missing, stale, or unverifiable is **inconclusive** and blocks
+qualification. Infrastructure faults — a broken host, a missing dependency, a
+toolchain that is not the pinned one — are **blocked**, never a candidate
+verdict.
+
+The build stage publishes the path of the binary it produced. The evaluator
+hashes that file itself and refuses the run if the stage's claim and the file
+disagree. The smoke stage reports the contract observed in the candidate's own
+`server_start` event, including the hash of the binary that served the request.
+The expected contract therefore carries no candidate identity: the model
+artifact, tokenizer, template, KV format, context capacity, and sampling
+defaults are invariant, while the binary and source commit are per-run
+evidence.
 
 ## What this tooling does not do
 

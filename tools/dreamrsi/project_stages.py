@@ -151,6 +151,18 @@ def stage_correctness(_: argparse.Namespace) -> int:
     build = Path(os.environ["NINFER_BUILD_DIR"])
     report = stage_support._binding()
     environment = _toolchain_env()
+    health = _gpu_health()
+    report["gpu_health"] = health
+    if not health.get("ok"):
+        # The host cannot create a CUDA context. A test failure here would be
+        # the host's fault, not the candidate's, so the stage is blocked.
+        log = _artifact("correctness-gpu-health.json", json.dumps(health, sort_keys=True))
+        report["status"] = "blocked"
+        report["semantic_result"] = "inconclusive"
+        report["detail"] = f"the evaluation host cannot create a CUDA context: {health.get('error')}"
+        stage_support._publish(report, {"correctness_evidence": log})
+        stage_support._write(report)
+        return 0
     targets = os.environ.get("NINFER_CORRECTNESS_TARGETS", "").split()
     if not targets:
         targets = ["ninfer_softmax_attention_test"]
@@ -165,6 +177,14 @@ def stage_correctness(_: argparse.Namespace) -> int:
     stage_support._publish(report, {"correctness_evidence": _raw_path("correctness.log")})
     stage_support._write(report)
     return 0
+
+
+def _gpu_health() -> dict[str, Any]:
+    try:
+        from . import lifecycle
+    except ImportError:  # direct module execution
+        import lifecycle  # type: ignore[no-redef]
+    return lifecycle.gpu_runtime_health()
 
 
 # ------------------------------------------------------------------------- replay
