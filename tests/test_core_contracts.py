@@ -136,7 +136,26 @@ def test_qualification_policy_requires_artifact_runtime_and_sampling_locks() -> 
         "kv_dtype": "k8v4",
         "max_context": 8192,
         "kv_capacity": 8192,
-        "sampling_capabilities": {"temperature": True, "top_p": True},
+        "max_concurrency": 1,
+        "speculative_backend": "mtp",
+        "draft_tokens": 7,
+        "proposal_head": "optimized",
+        "prefix_reuse": True,
+        "cuda_graph": True,
+        "prefill_chunk": 1024,
+        "preserve_thinking": True,
+        "sampling_defaults": {
+            "greedy": False,
+            "omitted_seed": "random",
+            "server_overrides": {"frequency_penalty": None, "min_p": None,
+                                 "presence_penalty": None, "seed": None,
+                                 "temperature": None, "top_k": None, "top_p": None},
+            "thinking": {"frequency_penalty": 0.0, "min_p": 0.0, "presence_penalty": 0.0,
+                         "temperature": 1.0, "top_k": 20, "top_p": 0.949999988079071},
+            "non_thinking": {"frequency_penalty": 0.0, "min_p": 0.0, "presence_penalty": 1.5,
+                             "temperature": 0.699999988079071, "top_k": 20,
+                             "top_p": 0.800000011920929},
+        },
     }
     policy["qualification_enabled"] = True
     identity = dict(policy)

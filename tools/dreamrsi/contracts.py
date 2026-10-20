@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -400,13 +401,31 @@ def _validate_qualification_contract(contract: dict[str, Any]) -> None:
         raise ValueError("qualification policy must explicitly lock runtime.kv_dtype")
     _positive_int(runtime.get("max_context"), "policy.contract.runtime.max_context")
     _positive_int(runtime.get("kv_capacity"), "policy.contract.runtime.kv_capacity")
-    sampling = runtime.get("sampling_capabilities")
-    if not isinstance(sampling, dict) or not sampling:
-        raise ValueError("policy.contract.runtime.sampling_capabilities must be a nonempty capability lock")
-    for name, enabled in sampling.items():
-        _identifier(name, "policy.contract.runtime.sampling_capabilities key")
-        if type(enabled) is not bool:
-            raise ValueError(f"sampling capability {name!r} must be boolean")
+    _validate_sampling_defaults(runtime.get("sampling_defaults"))
+
+
+def _validate_sampling_defaults(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("policy.contract.runtime.sampling_defaults must lock logged sampling defaults")
+    required_groups = {"greedy", "omitted_seed", "server_overrides", "thinking", "non_thinking"}
+    if not required_groups <= value.keys():
+        raise ValueError("sampling_defaults must include greedy, omitted_seed, server_overrides, thinking, non_thinking")
+    if type(value["greedy"]) is not bool:
+        raise ValueError("sampling_defaults.greedy must be boolean")
+    _nonempty(value["omitted_seed"], "sampling_defaults.omitted_seed")
+    if not isinstance(value["server_overrides"], dict):
+        raise ValueError("sampling_defaults.server_overrides must be an object")
+    numeric_fields = {"frequency_penalty", "min_p", "presence_penalty", "temperature", "top_p"}
+    for mode in ("thinking", "non_thinking"):
+        values = value[mode]
+        if not isinstance(values, dict) or not numeric_fields | {"top_k"} <= values.keys():
+            raise ValueError(f"sampling_defaults.{mode} is missing locked sampling fields")
+        for field in numeric_fields:
+            number = values[field]
+            if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number):
+                raise ValueError(f"sampling_defaults.{mode}.{field} must be finite numeric data")
+        if type(values["top_k"]) is not int:
+            raise ValueError(f"sampling_defaults.{mode}.top_k must be an integer")
 
 
 def validate_receipt(value: dict[str, Any]) -> dict[str, Any]:
