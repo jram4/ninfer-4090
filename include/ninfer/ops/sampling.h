@@ -18,7 +18,11 @@ enum SamplePurpose : std::int32_t {
     kSamplePurposeSpeculativeCorrection = 3,
     kSamplePurposeSpeculativeBonus      = 4,
     kSamplePurposeDFlash2Proposal       = 5,
+    kSamplePurposeMtpProposal           = 6,
 };
+
+inline constexpr std::int32_t kSamplingCandidateCapacity = 20;
+inline constexpr std::int32_t kMtpProposalSupportCapacity = 12;
 
 // Device-resident sampling parameters. token_counts is an optional device I32
 // [token_domain] committed generated-token occurrence-count array used by both penalties.
@@ -76,6 +80,28 @@ struct SamplingConfig {
 void sample(const Tensor& logits, Tensor& out, std::int32_t token_domain,
             const SamplingConfig* configs, const Tensor& logical_positions, std::int32_t purpose,
             WorkspaceArena& workspace, cudaStream_t stream);
+
+// Sample an MTP proposal and retain the exact conditional q distribution used for that draw.
+// logits is BF16 [proposal_rows,B], where id_map maps proposal rows to public token ids or is null
+// for identity mapping. Candidate outputs are contiguous I32/FP32 [20,K,B], and only candidate
+// column proposal_step is written. Stochastic q uses at most the top
+// kMtpProposalSupportCapacity adjusted-logit candidates before temperature/filter normalization;
+// unused candidate slots have q=0. `round_tokens` is I32 [K+1,B] with per-row counts in
+// round_counts; `prior_proposals` is row-pitched I32 [B,K] with the first prior_count proposals
+// in each row.
+// Both prefixes overlay configs[b].token_counts when applying presence/frequency penalties.
+// logical_positions are the autoregressive input positions; sampling uses position+position_step
+// and kSamplePurposeMtpProposal. This op never mutates token_counts and supports at least 20
+// proposal rows. Large multi-block routes use caller-owned transient storage sized by
+// sampling_workspace_capacity_bytes().
+void sample_mtp_proposal(const Tensor& logits, Tensor& out_tokens, Tensor& candidate_ids,
+                         Tensor& proposal_q, std::int32_t public_token_domain,
+                         const std::int32_t* id_map, const SamplingConfig* configs,
+                         const Tensor& logical_positions, const Tensor& round_tokens,
+                         const Tensor& round_counts, const Tensor& prior_proposals,
+                         std::int32_t prior_count, std::int32_t proposal_step,
+                         std::int32_t position_step, WorkspaceArena& workspace,
+                         cudaStream_t stream);
 
 // Adds every id in the contiguous non-empty I32 token_ids vector to the contiguous I32
 // [token_domain] committed count array. IDs must be in [0,token_domain).

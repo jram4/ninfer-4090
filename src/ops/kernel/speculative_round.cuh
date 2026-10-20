@@ -15,7 +15,7 @@
 
 namespace ninfer::ops {
 
-inline constexpr int kSparseSpeculativeCandidates = 16;
+inline constexpr int kSparseSpeculativeCandidates = 20;
 
 __global__ void speculative_prepare_verify_inputs_kernel(const std::int32_t* anchors,
                                                          const std::int32_t* drafts,
@@ -85,10 +85,12 @@ speculative_store_accept_result(const std::int32_t* row_drafts, std::int32_t k, 
 
 __device__ __forceinline__ float speculative_sparse_probability(const std::int32_t* candidate_ids,
                                                                 const float* proposal_q,
-                                                                std::int32_t token) {
+                                                                std::int32_t token,
+                                                                int candidate_count) {
     float probability = 0.0f;
 #pragma unroll
     for (int candidate = 0; candidate < kSparseSpeculativeCandidates; ++candidate) {
+        if (candidate >= candidate_count) { break; }
         if (candidate_ids[candidate] == token) {
             probability = proposal_q[candidate];
             break;
@@ -143,8 +145,8 @@ __global__ __launch_bounds__(256) void speculative_accept_sparse_warp_greedy_ker
 
 __device__ __forceinline__ void speculative_sparse_warp_accept(
     SamplingWorkspace workspace, const int* drafts, const int* candidate_ids,
-    const float* proposal_q, const SamplingConfig& cfg, int k, int row, int extent, bool greedy,
-    int* lengths, int* anchors, int* licensed_tokens, int* licensed_counts, int* accepted) {
+    const float* proposal_q, const SamplingConfig& cfg, int k, int candidate_count, int row,
+    int extent, bool greedy, int* lengths, int* anchors, int* licensed_tokens, int* licensed_counts, int* accepted) {
     const int lane       = threadIdx.x & 31;
     const int old_length = lengths[row];
     bool reject          = false;
@@ -162,8 +164,8 @@ __device__ __forceinline__ void speculative_sparse_warp_accept(
                     break;
                 }
             }
-            const int at   = (row * k + lane) * kSparseSpeculativeCandidates;
-            const float qd = speculative_sparse_probability(candidate_ids + at, proposal_q + at, d);
+            const int at   = (row * k + lane) * candidate_count;
+            const float qd = speculative_sparse_probability(candidate_ids + at, proposal_q + at, d, candidate_count);
             const float u  = sampling_uniform(cfg.seed, old_length + lane + 1,
                                               kSamplePurposeSpeculativeAccept, 0);
             reject         = !(pd >= qd || u * qd < pd);
@@ -183,9 +185,10 @@ __device__ __forceinline__ void speculative_sparse_warp_accept(
             token        = workspace.dist_idx[at];
             weight       = workspace.dist_prob[at];
             if (a < extent) {
-                const int q_at = (row * k + a) * kSparseSpeculativeCandidates;
+                const int q_at = (row * k + a) * candidate_count;
                 weight         = fmaxf(weight - speculative_sparse_probability(candidate_ids + q_at,
-                                                                               proposal_q + q_at, token),
+                                                                               proposal_q + q_at, token,
+                                                                               candidate_count),
                                        0.0f);
             }
         }
@@ -460,8 +463,9 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
     const std::int32_t* candidate_ids, const float* proposal_q, const std::int32_t* current_extents,
     std::int32_t* lengths, std::int32_t* anchors, std::int32_t* licensed_tokens,
     std::int32_t* licensed_counts, std::int32_t* accepted, const SamplingConfig* configs,
-    std::int32_t token_domain, std::int32_t cols, std::int32_t partial_blocks,
-    std::int32_t group_count, SamplingWorkspace workspace, std::size_t workspace_row_stride) {
+    std::int32_t token_domain, std::int32_t cols, std::int32_t candidate_count,
+    std::int32_t partial_blocks, std::int32_t group_count, SamplingWorkspace workspace,
+    std::size_t workspace_row_stride) {
     const int row   = static_cast<int>(blockIdx.z);
     const int group = static_cast<int>(blockIdx.x);
     const int col   = static_cast<int>(blockIdx.y);
@@ -577,7 +581,7 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
             __syncthreads();
             if (last_column && tid < 32)
                 speculative_sparse_warp_accept(workspace, drafts, candidate_ids, proposal_q, cfg, k,
-                                               row, extent, true, lengths, anchors, licensed_tokens,
+                                               candidate_count, row, extent, true, lengths, anchors, licensed_tokens,
                                                licensed_counts, accepted);
             if (last_column && tid == 0) *workspace.speculative_finalize_count = 0;
             return;
@@ -597,7 +601,7 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
         __syncthreads();
         if (last_column && tid < 32)
             speculative_sparse_warp_accept(workspace, drafts, candidate_ids, proposal_q, cfg, k,
-                                           row, extent, false, lengths, anchors, licensed_tokens,
+                                           candidate_count, row, extent, false, lengths, anchors, licensed_tokens,
                                            licensed_counts, accepted);
         if (last_column && tid == 0) *workspace.speculative_finalize_count = 0;
         return;

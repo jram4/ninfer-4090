@@ -925,6 +925,15 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                     for (std::uint32_t step = 0; step < sequence.mtp_draft_count; ++step) {
                         sequence.mtp_drafts[step] =
                             mtp_host_egress->next_drafts[step * max_concurrency + row];
+                        const std::size_t q_at =
+                            (row * draft_window + step) * qwen3_5::kMtpProposalCandidates;
+                        for (std::uint32_t candidate = 0;
+                             candidate < qwen3_5::kMtpProposalCandidates; ++candidate) {
+                            sequence.mtp_candidate_ids[step][candidate] =
+                                mtp_host_egress->next_candidate_ids[q_at + candidate];
+                            sequence.mtp_proposal_q[step][candidate] =
+                                mtp_host_egress->next_proposal_q[q_at + candidate];
+                        }
                     }
                 }
             } else {
@@ -1205,6 +1214,15 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             sequence.mtp_draft_count = staged.initial_mtp_extent;
             std::copy_n(initial_drafts.begin(), staged.initial_mtp_extent,
                         sequence.mtp_drafts.begin());
+            const auto public_tokens = parameters.model.resources().public_token_count;
+            for (std::uint32_t step = 0; step < staged.initial_mtp_extent; ++step) {
+                for (std::uint32_t candidate = 0;
+                     candidate < qwen3_5::kMtpProposalCandidates; ++candidate) {
+                    sequence.mtp_candidate_ids[step][candidate] = static_cast<TokenId>(
+                        (initial_drafts[step] + candidate) % public_tokens);
+                    sequence.mtp_proposal_q[step][candidate] = candidate == 0 ? 1.0F : 0.0F;
+                }
+            }
         } else if (is_masked_draft_backend(speculative_backend) &&
                    sequence.dflash_context_frontier != prompt_tokens) {
             throw std::logic_error("staged DFlash prefill did not reach the prompt frontier");
