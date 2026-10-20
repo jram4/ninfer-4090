@@ -14,6 +14,16 @@ import pytest
 from tools.dreamrsi import lifecycle
 
 
+def test_gpu_runtime_health_reports_instead_of_raising() -> None:
+    """The host probe must always return a verdict, never raise."""
+    health = lifecycle.gpu_runtime_health()
+    assert isinstance(health, dict)
+    assert health["ok"] in {True, False}
+    assert isinstance(health["device_count"], int)
+    if health["ok"] is False:
+        assert health["error"]
+
+
 def test_run_managed_uses_argv_and_captures_log(tmp_path: Path) -> None:
     log = tmp_path / "run.log"
     result = lifecycle.run_managed(
