@@ -74,6 +74,31 @@ def test_repeated_freeze_has_stable_source_and_submission_identity(tmp_path: Pat
     assert first["source"]["archive_sha256"] == second["source"]["archive_sha256"]
 
 
+def test_explicit_base_ref_handles_multi_commit_candidate_and_rejects_unrelated_base(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "candidate")
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "first.cpp").write_text("int first;\n", encoding="utf-8")
+    _git(repo, "add", "first.cpp")
+    _git(repo, "commit", "-qm", "candidate change one")
+    (repo / "second.cpp").write_text("int second;\n", encoding="utf-8")
+    _git(repo, "add", "second.cpp")
+    _git(repo, "commit", "-qm", "candidate change two")
+    candidate = _git(repo, "rev-parse", "HEAD")
+
+    submission = _freeze(repo, tmp_path / "based", ref=candidate, base_ref=base)
+    assert submission["base_commit"] == base
+    assert submission["candidate_commit"] == candidate
+
+    _git(repo, "checkout", "--orphan", "unrelated")
+    _git(repo, "rm", "-rf", ".")
+    (repo / "unrelated.cpp").write_text("int unrelated;\n", encoding="utf-8")
+    _git(repo, "add", "unrelated.cpp")
+    _git(repo, "commit", "-qm", "unrelated root")
+    unrelated = _git(repo, "rev-parse", "HEAD")
+    with pytest.raises(SubmissionError, match="ancestor"):
+        _freeze(repo, tmp_path / "bad-base", ref=candidate, base_ref=unrelated)
+
+
 def test_dirty_source_requires_explicit_permission_and_tracks_untracked_content(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "candidate")
     (repo / "src" / "models" / "kept.cpp").write_text("int changed;\n", encoding="utf-8")
@@ -136,3 +161,20 @@ def test_dirty_worktree_private_and_ignored_files_are_not_packaged(tmp_path: Pat
     assert ".env" not in paths
     assert "ignored.dat" not in paths
     assert "untracked.cpp" in paths
+
+
+def test_research_memory_roots_stay_excluded_even_with_dirty_inclusion(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "candidate")
+    (repo / "selected.cpp").write_text("int selected;\n", encoding="utf-8")
+    (repo / "Dream-RSI").mkdir()
+    (repo / "Dream-RSI" / "notes.md").write_text("private research\n", encoding="utf-8")
+    (repo / "Dream-RSI.zip").write_bytes(b"research archive")
+    (repo / ".obsidian").mkdir()
+    (repo / ".obsidian" / "vault.md").write_text("private memory\n", encoding="utf-8")
+    (repo / ".omo").mkdir()
+    (repo / ".omo" / "state.json").write_text("{}\n", encoding="utf-8")
+    submission = _freeze(repo, tmp_path / "package", include_dirty=True)
+    paths = {entry["path"] for entry in submission["source"]["manifest"]}
+    assert "selected.cpp" in paths
+    assert not any(path.startswith(("Dream-RSI/", ".obsidian/", ".omo/")) for path in paths)
+    assert "Dream-RSI.zip" not in paths

@@ -78,6 +78,26 @@ def test_duplicate_enqueue_is_idempotent_and_worker_has_one_active_job(tmp_path:
     assert queue.claim("worker-1") is None
 
 
+def test_central_evaluator_claims_global_fifo_across_submission_authors(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "candidate")
+    queue = Queue(tmp_path / "queue.sqlite", max_pending=4)
+    first = _submission(repo, tmp_path / "packages-a", "idea-1", "opt1")
+    second = _submission(repo, tmp_path / "packages-b", "idea-2", "opt2")
+    queue.enqueue(first)
+    queue.enqueue(second)
+
+    first_claim = queue.claim("fnn-gpu0")
+    assert first_claim is not None
+    assert first_claim["submission"]["worker_id"] == "opt1"
+    assert first_claim["submission_id"] == first["submission_id"]
+    queue.finish(first["submission_id"], first_claim["claim_token"], _receipt(first))
+
+    second_claim = queue.claim("fnn-gpu0")
+    assert second_claim is not None
+    assert second_claim["submission"]["worker_id"] == "opt2"
+    assert second_claim["submission_id"] == second["submission_id"]
+
+
 def test_fenced_lease_expiry_rejects_stale_finish_and_allows_retry(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "candidate")
     queue = Queue(tmp_path / "queue.sqlite")

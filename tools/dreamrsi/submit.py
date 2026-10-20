@@ -38,7 +38,8 @@ class SubmissionError(ValueError):
 _EXCLUDED_ROOTS = {
     ".git", ".slim", ".local", ".codex", ".venv", "venv", "build",
     "out", "profiles", "node_modules", "models", "research", "private",
-    "secrets", "credentials", "temp", "tmp",
+    "secrets", "credentials", "temp", "tmp", "Dream-RSI", "Dream-RSI.zip",
+    ".obsidian", ".omo",
 }
 _EXCLUDED_ANYWHERE = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 _LFS_HEADER = b"version https://git-lfs.github.com/spec/v1"
@@ -59,6 +60,19 @@ def _git(root: Path, *args: str, check: bool = True) -> bytes:
             f"git {' '.join(args)} failed: {detail.decode('utf-8', errors='replace').strip()}"
         ) from exc
     return completed.stdout
+
+
+def _git_succeeds(root: Path, *args: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError as exc:
+        raise SubmissionError(f"git {' '.join(args)} failed: {exc}") from exc
+    return result.returncode == 0
 
 
 def _included(path: PurePosixPath) -> bool:
@@ -346,6 +360,7 @@ def freeze_submission(
     contract_id: str,
     policy_id: str,
     ref: str = "HEAD",
+    base_ref: str | None = None,
     include_dirty: bool = False,
 ) -> dict[str, Any]:
     """Create a content-addressed, frozen source archive and valid submission.
@@ -376,12 +391,16 @@ def freeze_submission(
         raise SubmissionError("dirty inclusion requires ref to resolve to current HEAD")
     if is_dirty:
         manifest, contents = _worktree_manifest(root)
-        base_commit = resolved_ref
         candidate_commit = None
     else:
         manifest, contents = _manifest_from_commit(root, resolved_ref)
-        base_commit = _first_parent(root, resolved_ref)
         candidate_commit = resolved_ref
+    if base_ref is None:
+        base_commit = resolved_ref if is_dirty else _first_parent(root, resolved_ref)
+    else:
+        base_commit = _resolve_commit(root, base_ref)
+        if not _git_succeeds(root, "merge-base", "--is-ancestor", base_commit, resolved_ref):
+            raise SubmissionError("base_ref must resolve to an ancestor of ref")
     if not manifest:
         raise SubmissionError("selected source tree contains no source files")
 
@@ -480,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--contract-id", required=True)
     parser.add_argument("--policy-id", required=True)
     parser.add_argument("--ref", default="HEAD")
+    parser.add_argument("--base-ref")
     parser.add_argument("--include-dirty", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -492,6 +512,7 @@ def main(argv: list[str] | None = None) -> int:
             contract_id=args.contract_id,
             policy_id=args.policy_id,
             ref=args.ref,
+            base_ref=args.base_ref,
             include_dirty=args.include_dirty,
         ), sort_keys=True))
         return 0

@@ -124,6 +124,44 @@ def test_policy_identity_locks_contract_and_requires_ordered_stages() -> None:
     with pytest.raises(ValueError, match="contract_id"):
         validate_policy(policy)
 
+
+def test_qualification_policy_requires_artifact_runtime_and_sampling_locks() -> None:
+    policy = _policy()
+    artifact_sha = "a" * 64
+    policy["contract"]["model_artifact"] = {"sha256": artifact_sha, "size_bytes": 100}
+    policy["contract"]["tokenizer"] = {"embedded_in_model_artifact_sha256": artifact_sha}
+    policy["contract"]["runtime"] = {
+        "binary": {"sha256": "e" * 64, "size_bytes": 200},
+        "release_source_commit": "f" * 40,
+        "kv_dtype": "k8v4",
+        "max_context": 8192,
+        "kv_capacity": 8192,
+        "sampling_capabilities": {"temperature": True, "top_p": True},
+    }
+    policy["qualification_enabled"] = True
+    identity = dict(policy)
+    identity.pop("policy_id")
+    policy["contract_id"] = canonical_hash(policy["contract"])
+    identity["contract_id"] = policy["contract_id"]
+    policy["policy_id"] = canonical_hash(identity)
+    assert validate_policy(policy)["qualification_enabled"] is True
+
+    policy["contract"]["tokenizer"] = {"embedded_in_model_artifact_sha256": "0" * 64}
+    policy["contract_id"] = canonical_hash(policy["contract"])
+    identity = dict(policy)
+    identity.pop("policy_id")
+    policy["policy_id"] = canonical_hash(identity)
+    with pytest.raises(ValueError, match="tokenizer"):
+        validate_policy(policy)
+
+    exploratory = _policy()
+    exploratory["contract"]["runtime"] = "unknown"
+    exploratory["contract_id"] = canonical_hash(exploratory["contract"])
+    identity = dict(exploratory)
+    identity.pop("policy_id")
+    exploratory["policy_id"] = canonical_hash(identity)
+    assert validate_policy(exploratory)["qualification_enabled"] is False
+
     policy = _policy()
     policy["stages"].reverse()
     identity = dict(policy)
