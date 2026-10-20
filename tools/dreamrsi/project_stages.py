@@ -165,18 +165,60 @@ def stage_correctness(_: argparse.Namespace) -> int:
         return 0
     targets = os.environ.get("NINFER_CORRECTNESS_TARGETS", "").split()
     if not targets:
-        targets = ["ninfer_softmax_attention_test"]
+        # The test whose name matches the locked KV format. The default
+        # attention test also exercises Blackwell-only NVFP4 paths, which this
+        # host cannot run, so selecting it here would report a host
+        # limitation as a candidate failure.
+        targets = [_attention_test_for(os.environ.get("NINFER_KV_DTYPE", "k8v4"))]
     completed = _run(
         ["ctest", "--test-dir", str(build), "--output-on-failure", "-R", "|".join(targets)],
         timeout=7200, env=environment,
     )
-    _artifact("correctness.log", completed.stdout + completed.stderr)
-    report["status"] = "pass" if completed.returncode == 0 else "rejected"
-    report["semantic_result"] = "pass" if completed.returncode == 0 else "fail"
+    output = completed.stdout + completed.stderr
+    _artifact("correctness.log", output)
+    refused = _host_capability_refusal(output)
+    if refused:
+        # The host cannot run this gate. That is not evidence about the
+        # candidate.
+        report["status"] = "blocked"
+        report["semantic_result"] = "inconclusive"
+        report["detail"] = refused
+    elif completed.returncode == 0:
+        report["status"] = "pass"
+        report["semantic_result"] = "pass"
+    else:
+        report["status"] = "rejected"
+        report["semantic_result"] = "fail"
     report["correctness_targets"] = targets
     stage_support._publish(report, {"correctness_evidence": _raw_path("correctness.log")})
     stage_support._write(report)
     return 0
+
+
+def _attention_test_for(kv_dtype: str) -> str:
+    if kv_dtype == "k8v4":
+        return "ninfer_softmax_attention_k8v4_test"
+    if kv_dtype == "nvfp4":
+        return "ninfer_softmax_attention_nvfp4_test"
+    return "ninfer_softmax_attention_test"
+
+
+_HOST_CAPABILITY_MARKERS = (
+    "requires Blackwell",
+    "unsupported on this device",
+    "requires SM 10.0",
+    "requires sm_120",
+)
+
+
+def _host_capability_refusal(output: str) -> str | None:
+    """Detect a test that refused because the host cannot run it."""
+    for marker in _HOST_CAPABILITY_MARKERS:
+        if marker in output:
+            for line in output.splitlines():
+                if marker in line:
+                    return f"the evaluation host cannot run this gate: {line.strip()[:300]}"
+    return None
 
 
 def _gpu_health() -> dict[str, Any]:

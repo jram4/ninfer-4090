@@ -952,6 +952,8 @@ def _stage_environment(stage: Mapping[str, Any], paths: Mapping[str, Path | str]
         artifact = contract.get("model_artifact")
         template = contract.get("template")
         contract_runtime = contract.get("runtime")
+        if isinstance(contract_runtime, Mapping) and contract_runtime.get("kv_dtype"):
+            environment["NINFER_KV_DTYPE"] = str(contract_runtime["kv_dtype"])
         baseline_binary = contract_runtime.get("binary") if isinstance(contract_runtime, Mapping) else None
         if isinstance(baseline_binary, Mapping) and baseline_binary.get("sha256"):
             environment["NINFER_BASELINE_BINARY_SHA256"] = str(baseline_binary["sha256"])

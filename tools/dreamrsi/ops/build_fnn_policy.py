@@ -30,7 +30,6 @@ REMOTE_PYTHON = ("/home/aramirezfamily/.local/share/uv/python/"
 def build_specification(args: argparse.Namespace) -> dict:
     harness = args.harness
     plan = args.plan
-    baseline = args.baseline_rows
     contract = json.loads(args.contract.read_text(encoding="utf-8"))
     stages = [
         {
