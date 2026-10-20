@@ -22,7 +22,9 @@ void launch_k8v4_partial(const Tensor& q, CacheInput input, const Tensor& positi
                                          : RowTiles > 3  ? 2 * RowTiles
                                          : RowTiles == 3 ? 12
                                                          : 8;
-    constexpr int KeyBlock             = TokenTile == 1 ? 32 : 64;
+    // K7's eight-query verifier tile uses a 32-key stage to halve per-CTA shared-memory
+    // staging and expose more resident CTAs while scanning long occupied histories.
+    constexpr int KeyBlock             = (TokenTile == 1 || TokenTile == 8) ? 32 : 64;
     constexpr int MinBlocks            = TokenTile == 1 ? 2 : 1;
     constexpr std::size_t DynamicBytes = 7u * KeyBlock * kCausalHeadDim / 2u;
     using KernelInput                  = CacheInput;

@@ -2384,6 +2384,9 @@ int run_k8v4_cases() {
                             {16, 8176, 8192, 834u}, MappingPattern::Fragmented);
     failures += run_a3_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value,
                             {16, 1000, 32768, 835u}, MappingPattern::Fragmented);
+    // K7 verifier tile at a long occupied history, checked against the independent packed-KV oracle.
+    failures += run_a3_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value,
+                            {8, 32760, 32768, 839u}, MappingPattern::Fragmented);
     failures += run_a1_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value,
                             {11, 640, 1024, 836u, false, true}, MappingPattern::Fragmented);
     failures += run_a1_case(kGeometries[0], KvCacheStorage::Fp8KeyNvfp4Value,
