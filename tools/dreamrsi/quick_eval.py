@@ -555,12 +555,14 @@ def _classify(
     session_count: int,
     blockers: list[str],
     candidate_failures: int,
+    minimum_pairs: int = MIN_COMPLETE_PAIRS,
+    minimum_sessions: int = MIN_INDEPENDENT_SESSIONS,
 ) -> tuple[str, str]:
-    if complete_pairs < MIN_COMPLETE_PAIRS or session_count < MIN_INDEPENDENT_SESSIONS:
+    if complete_pairs < minimum_pairs or session_count < minimum_sessions:
         return (
             "inconclusive",
-            f"need at least {MIN_COMPLETE_PAIRS} complete fixed-work pairs across "
-            f"{MIN_INDEPENDENT_SESSIONS} independent sessions",
+            f"need at least {minimum_pairs} complete fixed-work pairs across "
+            f"{minimum_sessions} independent sessions",
         )
     if candidate_failures:
         return "regression", "candidate has error, incomplete, or truncated responses"
@@ -589,8 +591,15 @@ def reduce_pair(
     *,
     split: str = "screen",
     bootstrap_resamples: int = DEFAULT_BOOTSTRAP_RESAMPLES,
+    minimum_pairs: int = MIN_COMPLETE_PAIRS,
+    minimum_sessions: int = MIN_INDEPENDENT_SESSIONS,
 ) -> JsonObject:
-    """Reduce matching baseline/candidate results and cluster uncertainty by session."""
+    """Reduce matching baseline/candidate results and cluster uncertainty by session.
+
+    ``minimum_pairs`` and ``minimum_sessions`` are the thresholds the trusted
+    policy sets for this split. A holdout split is smaller than a screen by
+    design, so it carries its own thresholds.
+    """
     if isinstance(bootstrap_resamples, bool) or not isinstance(bootstrap_resamples, int) or bootstrap_resamples < 0:
         raise QuickEvalError("bootstrap_resamples must be a nonnegative integer")
     selected = _validate_plan(plan, split)
@@ -757,6 +766,8 @@ def reduce_pair(
         session_count=independent_sessions,
         blockers=blocker_ids,
         candidate_failures=candidate_failures,
+        minimum_pairs=minimum_pairs,
+        minimum_sessions=minimum_sessions,
     )
     if runtime_identity_variation and classification == "promising":
         classification = "inconclusive"
@@ -801,8 +812,8 @@ def reduce_pair(
         "task_quality": "not_evaluated",
         "insufficient_data_is_inconclusive": True,
         "thresholds": {
-            "minimum_complete_pairs": MIN_COMPLETE_PAIRS,
-            "minimum_independent_sessions": MIN_INDEPENDENT_SESSIONS,
+            "minimum_complete_pairs": minimum_pairs,
+            "minimum_independent_sessions": minimum_sessions,
             "material_performance_change": 0.05,
             "interval": "95% percentile bootstrap of session-clustered mean log ratios",
         },

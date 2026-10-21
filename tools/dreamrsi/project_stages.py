@@ -364,11 +364,20 @@ def _compare(plan: dict[str, Any], split: str, baseline_rows: Path,
     def load(path: Path) -> list[dict[str, Any]]:
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
-    comparison = reduce_pair(plan, load(baseline_rows), load(candidate_rows), split=split)
+    minimum_pairs = int(os.environ.get("NINFER_MIN_PAIRS", "12"))
+    minimum_sessions = int(os.environ.get("NINFER_MIN_SESSIONS", "8"))
+    comparison = reduce_pair(plan, load(baseline_rows), load(candidate_rows), split=split,
+                             minimum_pairs=minimum_pairs, minimum_sessions=minimum_sessions)
     _artifact(f"{split}-comparison.json", json.dumps(comparison, sort_keys=True, indent=2))
     report["status"] = "pass"
     report["classification"] = comparison.get("classification")
     report["paired"] = comparison.get("paired")
+    # The trusted policy names the field each split must publish.
+    sessions = comparison.get("paired", {}).get("independent_sessions_with_eligible_pairs")
+    if split == "holdout":
+        report["holdout_groups"] = sessions
+    else:
+        report["independent_sessions"] = sessions
     stats = comparison.get("paired", {}).get(
         "committed_token_rate_ratio_candidate_over_baseline", {})
     report["independent_sessions"] = stats.get("independent_sessions")

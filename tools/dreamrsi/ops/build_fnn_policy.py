@@ -74,8 +74,12 @@ def build_specification(args: argparse.Namespace) -> dict:
         },
     ]
     for name, split, evidence, gate, extra in (
-        ("screen", "screen", "screen_evidence", None, {}),
-        ("full", "holdout", "full_evidence", "holdout", {"minimum": {"holdout_groups": 2}}),
+        ("screen", "screen", "screen_evidence", None,
+         {"minimum": {"independent_sessions": 8},
+          "thresholds": {"NINFER_MIN_PAIRS": "12", "NINFER_MIN_SESSIONS": "8"}}),
+        ("full", "holdout", "full_evidence", "holdout",
+         {"minimum": {"holdout_groups": 2},
+          "thresholds": {"NINFER_MIN_PAIRS": "8", "NINFER_MIN_SESSIONS": "4"}}),
     ):
         stage = {
             "name": name,
@@ -90,8 +94,9 @@ def build_specification(args: argparse.Namespace) -> dict:
             "timeout_seconds": 14400,
             "required_evidence": [evidence],
             # A fixed generation seed, so the two arms perform the same work.
-            "criteria": {"equals": {"status": "pass"}, **extra,
-                         "env": {"NINFER_EVAL_SEED": args.seed}},
+            "criteria": {"equals": {"status": "pass"},
+                         "env": {"NINFER_EVAL_SEED": args.seed, **extra.pop("thresholds", {})},
+                         **extra},
         }
         if gate:
             stage["gates"] = [gate]
