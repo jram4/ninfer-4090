@@ -70,7 +70,10 @@ def build_specification(args: argparse.Namespace) -> dict:
             "timeout_seconds": 1800,
             "required_evidence": ["smoke_evidence", "contract_observation"],
             "gates": ["task"],
-            "criteria": {"equals": {"status": "pass", "task_result": "pass"}},
+            # This is the one stage whose observed contract is compared with
+            # the trusted contract.
+            "criteria": {"equals": {"status": "pass", "task_result": "pass"},
+                         "observes_contract": True},
         },
     ]
     for name, split, evidence, gate, extra in (
@@ -131,10 +134,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
+        # Check the policy against the evaluator's own rules before it is
+        # used, so a wiring mistake does not cost a full evaluation run.
+        from tools.dreamrsi import evaluator as evaluator_module
+
         plan = json.loads(args.plan.read_text(encoding="utf-8"))
         args.corpus_id = args.corpus_id or plan["corpus_id"]
         specification = build_specification(args)
         built = policy_builder.build_policy(specification)
+        evaluator_module._policy_stages(built)
         contracts.write_json(args.output, built)
         print(json.dumps({
             "policy_id": built["policy_id"],
