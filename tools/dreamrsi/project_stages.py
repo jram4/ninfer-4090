@@ -573,8 +573,10 @@ def stage_smoke(_: argparse.Namespace) -> int:
             f"not the locked {expected_size}")
     binary_sha256 = _sha256_file(binary)
     binary_size = binary.stat().st_size
-    observed = _observed_contract(start, binary_sha256, binary_size)
+    observed = _observed_contract(start, binary_sha256, binary_size, template)
     report["observed_contract"] = observed
+    # The environment is recorded, but it is not part of the compared contract.
+    report["observed_environment"] = observed_environment(start)
     report["status"] = "pass" if completion.get("ok") else "rejected"
     report["task_result"] = "pass" if completion.get("ok") else "fail"
     report["smoke_response"] = {key: completion[key] for key in ("status", "ok", "completion_tokens")}
@@ -638,8 +640,18 @@ def _first_server_start(log_path: Path) -> dict[str, Any] | None:
     return None
 
 
+def observed_environment(start: dict[str, Any]) -> dict[str, Any]:
+    environment = start.get("environment", {})
+    return {
+        "gpu_name": environment.get("gpu_name"),
+        "gpu_uuid": environment.get("gpu_uuid"),
+        "cuda_runtime_version": environment.get("cuda_runtime_version"),
+        "cuda_driver_version": environment.get("cuda_driver_version"),
+    }
+
+
 def _observed_contract(start: dict[str, Any], binary_sha256: str,
-                       binary_size: int) -> dict[str, Any]:
+                       binary_size: int, template: Path) -> dict[str, Any]:
     engine = start.get("engine", {})
     artifact = start.get("artifact", {})
     server = start.get("server", {})
@@ -647,8 +659,10 @@ def _observed_contract(start: dict[str, Any], binary_sha256: str,
     backend = engine.get("speculative_backend")
     return {
         "model_artifact": {
+            "path": artifact.get("path"),
             "sha256": os.environ.get("NINFER_MODEL_SHA256"),
             "size_bytes": artifact.get("size_bytes"),
+            "formats": artifact.get("formats"),
         },
         "runtime": {
             "kv_dtype": engine.get("kv_cache"),
@@ -677,15 +691,12 @@ def _observed_contract(start: dict[str, Any], binary_sha256: str,
             "release_source_commit": os.environ.get("NINFER_RELEASE_SOURCE_COMMIT"),
             "sampling_defaults": start.get("sampling_defaults"),
         },
-        "template": {"sha256": os.environ.get("NINFER_TEMPLATE_SHA256")},
+        "template": {
+            "path": str(template),
+            "sha256": os.environ.get("NINFER_TEMPLATE_SHA256"),
+        },
         "tokenizer": {
             "embedded_in_model_artifact_sha256": os.environ.get("NINFER_MODEL_SHA256"),
-        },
-        "observed_environment": {
-            "gpu_name": environment.get("gpu_name"),
-            "gpu_uuid": environment.get("gpu_uuid"),
-            "cuda_runtime_version": environment.get("cuda_runtime_version"),
-            "cuda_driver_version": environment.get("cuda_driver_version"),
         },
     }
 
